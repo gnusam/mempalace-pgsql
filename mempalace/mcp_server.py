@@ -27,11 +27,7 @@ from .config import MempalaceConfig
 from .version import __version__
 from .searcher import search_memories
 from .palace_graph import traverse, find_tunnels, graph_stats
-import chromadb
-
-from .knowledge_graph import KnowledgeGraph
-
-_kg = KnowledgeGraph()
+from .db import get_db
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -39,20 +35,15 @@ logger = logging.getLogger("mempalace_mcp")
 _config = MempalaceConfig()
 
 
-def _get_collection(create=False):
-    """Return the ChromaDB collection, or None on failure."""
-    try:
-        client = chromadb.PersistentClient(path=_config.palace_path)
-        if create:
-            return client.get_or_create_collection(_config.collection_name)
-        return client.get_collection(_config.collection_name)
-    except Exception:
-        return None
+def _get_db():
+    """Return the PalaceDB instance."""
+    return get_db()
 
 
 def _no_palace():
     return {
         "error": "No palace found",
+        "palace_path": _config.palace_path,
         "hint": "Run: mempalace init <dir> && mempalace mine <dir>",
     }
 
@@ -61,26 +52,17 @@ def _no_palace():
 
 
 def tool_status():
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    count = col.count()
-    wings = {}
-    rooms = {}
-    try:
-        all_meta = col.get(include=["metadatas"], limit=10000)["metadatas"]
-        for m in all_meta:
-            w = m.get("wing", "unknown")
-            r = m.get("room", "unknown")
-            wings[w] = wings.get(w, 0) + 1
-            rooms[r] = rooms.get(r, 0) + 1
-    except Exception:
-        pass
+    db = _get_db()
+    count = db.count()
+    cur = db.conn().cursor()
+    cur.execute("SELECT wing, count(*) FROM drawers GROUP BY wing ORDER BY count DESC")
+    wings = {r[0]: r[1] for r in cur.fetchall()}
+    cur.execute("SELECT room, count(*) FROM drawers GROUP BY room ORDER BY count DESC LIMIT 50")
+    rooms = {r[0]: r[1] for r in cur.fetchall()}
     return {
         "total_drawers": count,
         "wings": wings,
         "rooms": rooms,
-        "palace_path": _config.palace_path,
         "protocol": PALACE_PROTOCOL,
         "aaak_dialect": AAAK_SPEC,
     }
@@ -110,7 +92,7 @@ FORMAT:
   IMPORTANCE: ★ to ★★★★★ (1-5 scale).
   HALLS: hall_facts, hall_events, hall_discoveries, hall_preferences, hall_advice.
   WINGS: wing_user, wing_agent, wing_team, wing_code, wing_myproject, wing_hardware, wing_ue5, wing_ai_research.
-  ROOMS: Hyphenated slugs representing named ideas (e.g., chromadb-setup, gpu-pricing).
+  ROOMS: Hyphenated slugs representing named ideas (e.g., auth-migration, gpu-pricing).
 
 EXAMPLE:
   FAM: ALC→♡JOR | 2D(kids): RIL(18,sports) MAX(11,chess+swimming) | BEN(contributor)
@@ -120,53 +102,33 @@ When WRITING AAAK: use entity codes, mark emotions, keep structure tight."""
 
 
 def tool_list_wings():
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    wings = {}
-    try:
-        all_meta = col.get(include=["metadatas"], limit=10000)["metadatas"]
-        for m in all_meta:
-            w = m.get("wing", "unknown")
-            wings[w] = wings.get(w, 0) + 1
-    except Exception:
-        pass
+    db = _get_db()
+    cur = db.conn().cursor()
+    cur.execute("SELECT wing, count(*) FROM drawers GROUP BY wing ORDER BY count DESC")
+    wings = {r[0]: r[1] for r in cur.fetchall()}
     return {"wings": wings}
 
 
 def tool_list_rooms(wing: str = None):
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    rooms = {}
-    try:
-        kwargs = {"include": ["metadatas"], "limit": 10000}
-        if wing:
-            kwargs["where"] = {"wing": wing}
-        all_meta = col.get(**kwargs)["metadatas"]
-        for m in all_meta:
-            r = m.get("room", "unknown")
-            rooms[r] = rooms.get(r, 0) + 1
-    except Exception:
-        pass
+    db = _get_db()
+    cur = db.conn().cursor()
+    if wing:
+        cur.execute("SELECT room, count(*) FROM drawers WHERE wing = %s GROUP BY room ORDER BY count DESC", (wing,))
+    else:
+        cur.execute("SELECT room, count(*) FROM drawers GROUP BY room ORDER BY count DESC")
+    rooms = {r[0]: r[1] for r in cur.fetchall()}
     return {"wing": wing or "all", "rooms": rooms}
 
 
 def tool_get_taxonomy():
-    col = _get_collection()
-    if not col:
-        return _no_palace()
+    db = _get_db()
+    cur = db.conn().cursor()
+    cur.execute("SELECT wing, room, count(*) FROM drawers GROUP BY wing, room ORDER BY wing, count DESC")
     taxonomy = {}
-    try:
-        all_meta = col.get(include=["metadatas"], limit=10000)["metadatas"]
-        for m in all_meta:
-            w = m.get("wing", "unknown")
-            r = m.get("room", "unknown")
-            if w not in taxonomy:
-                taxonomy[w] = {}
-            taxonomy[w][r] = taxonomy[w].get(r, 0) + 1
-    except Exception:
-        pass
+    for w, r, c in cur.fetchall():
+        if w not in taxonomy:
+            taxonomy[w] = {}
+        taxonomy[w][r] = c
     return {"taxonomy": taxonomy}
 
 
@@ -181,15 +143,9 @@ def tool_search(query: str, limit: int = 5, wing: str = None, room: str = None):
 
 
 def tool_check_duplicate(content: str, threshold: float = 0.9):
-    col = _get_collection()
-    if not col:
-        return _no_palace()
+    db = _get_db()
     try:
-        results = col.query(
-            query_texts=[content],
-            n_results=5,
-            include=["metadatas", "documents", "distances"],
-        )
+        results = db.query(content, n_results=5)
         duplicates = []
         if results["ids"] and results["ids"][0]:
             for i, drawer_id in enumerate(results["ids"][0]):
@@ -222,26 +178,17 @@ def tool_get_aaak_spec():
 
 def tool_traverse_graph(start_room: str, max_hops: int = 2):
     """Walk the palace graph from a room. Find connected ideas across wings."""
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    return traverse(start_room, col=col, max_hops=max_hops)
+    return traverse(start_room, max_hops=max_hops)
 
 
 def tool_find_tunnels(wing_a: str = None, wing_b: str = None):
     """Find rooms that bridge two wings — the hallways connecting domains."""
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    return find_tunnels(wing_a, wing_b, col=col)
+    return find_tunnels(wing_a, wing_b)
 
 
 def tool_graph_stats():
     """Palace graph overview: nodes, tunnels, edges, connectivity."""
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    return graph_stats(col=col)
+    return graph_stats()
 
 
 # ==================== WRITE TOOLS ====================
@@ -251,11 +198,8 @@ def tool_add_drawer(
     wing: str, room: str, content: str, source_file: str = None, added_by: str = "mcp"
 ):
     """File verbatim content into a wing/room. Checks for duplicates first."""
-    col = _get_collection(create=True)
-    if not col:
-        return _no_palace()
+    db = _get_db()
 
-    # Duplicate check
     dup = tool_check_duplicate(content, threshold=0.9)
     if dup.get("is_duplicate"):
         return {
@@ -264,39 +208,23 @@ def tool_add_drawer(
             "matches": dup["matches"],
         }
 
-    drawer_id = f"drawer_{wing}_{room}_{hashlib.md5((content[:100] + datetime.now().isoformat()).encode()).hexdigest()[:16]}"
-
     try:
-        col.add(
-            ids=[drawer_id],
-            documents=[content],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "source_file": source_file or "",
-                    "chunk_index": 0,
-                    "added_by": added_by,
-                    "filed_at": datetime.now().isoformat(),
-                }
-            ],
-        )
-        logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
-        return {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
+        drawer_id = db.add_drawer(wing, room, content, source_file or "", 0, added_by)
+        if drawer_id:
+            logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
+            return {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
+        return {"success": False, "error": "duplicate id"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
 def tool_delete_drawer(drawer_id: str):
     """Delete a single drawer by ID."""
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    existing = col.get(ids=[drawer_id])
-    if not existing["ids"]:
+    db = _get_db()
+    if not db.drawer_exists(drawer_id):
         return {"success": False, "error": f"Drawer not found: {drawer_id}"}
     try:
-        col.delete(ids=[drawer_id])
+        db.delete_drawer(drawer_id)
         logger.info(f"Deleted drawer: {drawer_id}")
         return {"success": True, "drawer_id": drawer_id}
     except Exception as e:
@@ -308,7 +236,8 @@ def tool_delete_drawer(drawer_id: str):
 
 def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
     """Query the knowledge graph for an entity's relationships."""
-    results = _kg.query_entity(entity, as_of=as_of, direction=direction)
+    db = _get_db()
+    results = db.query_entity(entity, as_of=as_of, direction=direction)
     return {"entity": entity, "as_of": as_of, "facts": results, "count": len(results)}
 
 
@@ -316,7 +245,8 @@ def tool_kg_add(
     subject: str, predicate: str, object: str, valid_from: str = None, source_closet: str = None
 ):
     """Add a relationship to the knowledge graph."""
-    triple_id = _kg.add_triple(
+    db = _get_db()
+    triple_id = db.add_triple(
         subject, predicate, object, valid_from=valid_from, source_closet=source_closet
     )
     return {"success": True, "triple_id": triple_id, "fact": f"{subject} → {predicate} → {object}"}
@@ -324,7 +254,8 @@ def tool_kg_add(
 
 def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None):
     """Mark a fact as no longer true (set end date)."""
-    _kg.invalidate(subject, predicate, object, ended=ended)
+    db = _get_db()
+    db.invalidate(subject, predicate, object, ended=ended)
     return {
         "success": True,
         "fact": f"{subject} → {predicate} → {object}",
@@ -334,13 +265,15 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
 
 def tool_kg_timeline(entity: str = None):
     """Get chronological timeline of facts, optionally for one entity."""
-    results = _kg.timeline(entity)
+    db = _get_db()
+    results = db.timeline(entity)
     return {"entity": entity or "all", "timeline": results, "count": len(results)}
 
 
 def tool_kg_stats():
     """Knowledge graph overview: entities, triples, relationship types."""
-    return _kg.stats()
+    db = _get_db()
+    return db.kg_stats()
 
 
 # ==================== AGENT DIARY ====================
@@ -355,35 +288,23 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
     what it worked on, what it noticed, what it thinks matters.
     """
     wing = f"wing_{agent_name.lower().replace(' ', '_')}"
-    room = "diary"
-    col = _get_collection(create=True)
-    if not col:
-        return _no_palace()
-
-    now = datetime.now()
-    entry_id = f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(entry[:50].encode()).hexdigest()[:8]}"
+    db = _get_db()
 
     try:
-        col.add(
-            ids=[entry_id],
-            documents=[entry],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "hall": "hall_diary",
-                    "topic": topic,
-                    "type": "diary_entry",
-                    "agent": agent_name,
-                    "filed_at": now.isoformat(),
-                    "date": now.strftime("%Y-%m-%d"),
-                }
-            ],
+        now = datetime.now()
+        drawer_id = db.add_drawer(
+            wing=wing, room="diary", content=entry, source_file="",
+            chunk_index=0, agent=agent_name,
+            metadata={
+                "hall": "hall_diary", "topic": topic,
+                "type": "diary_entry", "agent": agent_name,
+                "date": now.strftime("%Y-%m-%d"),
+            },
         )
-        logger.info(f"Diary entry: {entry_id} → {wing}/diary/{topic}")
+        logger.info(f"Diary entry: {drawer_id} → {wing}/diary/{topic}")
         return {
             "success": True,
-            "entry_id": entry_id,
+            "entry_id": drawer_id,
             "agent": agent_name,
             "topic": topic,
             "timestamp": now.isoformat(),
@@ -398,21 +319,17 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
     in chronological order — the agent's personal journal.
     """
     wing = f"wing_{agent_name.lower().replace(' ', '_')}"
-    col = _get_collection()
-    if not col:
-        return _no_palace()
+    db = _get_db()
 
     try:
-        results = col.get(
+        results = db.get_drawers(
             where={"$and": [{"wing": wing}, {"room": "diary"}]},
-            include=["documents", "metadatas"],
             limit=10000,
         )
 
         if not results["ids"]:
             return {"agent": agent_name, "entries": [], "message": "No diary entries yet."}
 
-        # Combine and sort by timestamp
         entries = []
         for doc, meta in zip(results["documents"], results["metadatas"]):
             entries.append(
@@ -552,13 +469,13 @@ TOOLS = {
         "handler": tool_kg_stats,
     },
     "mempalace_traverse": {
-        "description": "Walk the palace graph from a room. Shows connected ideas across wings — the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).",
+        "description": "Walk the palace graph from a room. Shows connected ideas across wings — the tunnels. Like following a thread through the palace: start at 'auth-migration' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).",
         "input_schema": {
             "type": "object",
             "properties": {
                 "start_room": {
                     "type": "string",
-                    "description": "Room to start from (e.g. 'chromadb-setup', 'riley-school')",
+                    "description": "Room to start from (e.g. 'auth-migration', 'riley-school')",
                 },
                 "max_hops": {
                     "type": "integer",
@@ -728,7 +645,7 @@ def handle_request(request):
             }
         # Coerce argument types based on input_schema.
         # MCP JSON transport may deliver integers as floats or strings;
-        # ChromaDB and Python slicing require native int.
+        # Python slicing and psycopg2 parameter binding require native int.
         schema_props = TOOLS[tool_name]["input_schema"].get("properties", {})
         for key, value in list(tool_args.items()):
             prop_schema = schema_props.get(key, {})

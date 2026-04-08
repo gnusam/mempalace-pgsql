@@ -3,10 +3,15 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import chromadb
 import yaml
 
+from mempalace.db import PalaceDB
 from mempalace.miner import mine, scan_project
+
+
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql://mempalace:mempalace@localhost:5433/mempalace"
+)
 
 
 def write_file(path: Path, content: str):
@@ -21,6 +26,7 @@ def scanned_files(project_root: Path, **kwargs):
 
 def test_project_mining():
     tmpdir = tempfile.mkdtemp()
+    db = None
     try:
         project_root = Path(tmpdir).resolve()
         os.makedirs(project_root / "backend")
@@ -31,7 +37,7 @@ def test_project_mining():
         with open(project_root / "mempalace.yaml", "w") as f:
             yaml.dump(
                 {
-                    "wing": "test_project",
+                    "wing": "test_mine_project",
                     "rooms": [
                         {"name": "backend", "description": "Backend code"},
                         {"name": "general", "description": "General"},
@@ -40,13 +46,15 @@ def test_project_mining():
                 f,
             )
 
-        palace_path = project_root / "palace"
-        mine(str(project_root), str(palace_path))
+        mine(str(project_root), palace_path=None)
 
-        client = chromadb.PersistentClient(path=str(palace_path))
-        col = client.get_collection("mempalace_drawers")
-        assert col.count() > 0
+        db = PalaceDB(DATABASE_URL)
+        assert db.count(where={"wing": "test_mine_project"}) > 0
     finally:
+        if db is not None:
+            cur = db.conn().cursor()
+            cur.execute("DELETE FROM drawers WHERE wing = 'test_mine_project'")
+            db.close()
         shutil.rmtree(tmpdir)
 
 

@@ -98,8 +98,16 @@ class MempalaceConfig:
         return self._file_config.get("palace_path", DEFAULT_PALACE_PATH)
 
     @property
+    def database_url(self):
+        """PostgreSQL connection string."""
+        env_val = os.environ.get("DATABASE_URL")
+        if env_val:
+            return env_val
+        return self._file_config.get("database_url", "postgresql://mempalace:mempalace@localhost:5433/mempalace")
+
+    @property
     def collection_name(self):
-        """ChromaDB collection name."""
+        """Collection name (legacy compat)."""
         return self._file_config.get("collection_name", DEFAULT_COLLECTION_NAME)
 
     @property

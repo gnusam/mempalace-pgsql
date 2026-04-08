@@ -29,6 +29,7 @@ Usage:
     python benchmarks/membench_bench.py /tmp/membench/MemData/FirstAgent --limit 50
 """
 
+import os
 import sys
 import json
 import re
@@ -37,20 +38,87 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
-import chromadb
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# ── Shared ephemeral ChromaDB client ──────────────────────────────────────────
-_bench_client = chromadb.EphemeralClient()
+from mempalace.db import PalaceDB, get_db, embed
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://mempalace:mempalace@localhost:5433/mempalace")
+
+
+# ── In-memory vector collection (replaces ChromaDB EphemeralClient) ──────────
+class _BenchCollection:
+    """Lightweight in-memory vector store using mempalace.db embed()."""
+
+    def __init__(self):
+        self._docs = []
+        self._ids = []
+        self._metas = []
+        self._embeddings = []
+
+    def add(self, documents, ids, metadatas=None, embeddings=None):
+        self._docs.extend(documents)
+        self._ids.extend(ids)
+        if metadatas:
+            self._metas.extend(metadatas)
+        else:
+            self._metas.extend([{} for _ in documents])
+        if embeddings is not None:
+            self._embeddings.extend([np.array(e, dtype=np.float32) for e in embeddings])
+        else:
+            self._embeddings.extend(embed(documents))
+
+    def query(self, query_texts=None, query_embeddings=None, n_results=5, include=None, where=None):
+        if not self._embeddings:
+            return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+        if query_embeddings is not None:
+            q_emb = np.array(query_embeddings[0], dtype=np.float32)
+        else:
+            q_emb = embed(query_texts[:1])[0]
+        # Filter by where clause if provided
+        indices = list(range(len(self._docs)))
+        if where:
+            filtered = []
+            for i in indices:
+                match = True
+                for k, v in where.items():
+                    if k.startswith("$"):
+                        continue
+                    meta_val = self._metas[i].get(k)
+                    if isinstance(v, dict) and "$in" in v:
+                        if meta_val not in v["$in"]:
+                            match = False
+                    elif meta_val != v:
+                        match = False
+                if match:
+                    filtered.append(i)
+            indices = filtered
+        # Cosine distance
+        emb_matrix = np.array([self._embeddings[i] for i in indices], dtype=np.float32)
+        if len(emb_matrix) == 0:
+            return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+        norms_m = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+        norm_q = np.linalg.norm(q_emb)
+        norms_m[norms_m == 0] = 1
+        if norm_q == 0:
+            norm_q = 1
+        cosine_sim = emb_matrix @ q_emb / (norms_m.squeeze() * norm_q)
+        distances = 1.0 - cosine_sim
+        top_k = min(n_results, len(indices))
+        top_idx = np.argsort(distances)[:top_k]
+        out_ids = [self._ids[indices[i]] for i in top_idx]
+        out_docs = [self._docs[indices[i]] for i in top_idx]
+        out_metas = [self._metas[indices[i]] for i in top_idx]
+        out_dists = [float(distances[i]) for i in top_idx]
+        return {"ids": [out_ids], "documents": [out_docs], "metadatas": [out_metas], "distances": [out_dists]}
+
+    def count(self):
+        return len(self._docs)
 
 
 def _fresh_collection(name="membench_drawers"):
-    try:
-        _bench_client.delete_collection(name)
-    except Exception:
-        pass
-    return _bench_client.create_collection(name)
+    return _BenchCollection()
 
 
 # ── Stop words (same as locomo_bench) ─────────────────────────────────────────

@@ -14,7 +14,7 @@ from AAAK output. It is a structured summary layer (closets) that points to the
 original verbatim content (drawers). The 96.6% benchmark score is from raw mode,
 not AAAK mode.
 
-Adapted for mempalace: works standalone on plain text and ChromaDB drawers.
+Adapted for mempalace: works standalone on plain text and palace drawers.
 No dependency on palace.py or layers.py.
 
 FORMAT:

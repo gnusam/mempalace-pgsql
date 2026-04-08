@@ -2,109 +2,189 @@
 
 <img src="assets/mempalace_logo.png" alt="MemPalace" width="280">
 
-# MemPalace
+# MemPalace-PgSQL
 
-### The highest-scoring AI memory system ever benchmarked. And it's free.
-
-<br>
-
-Every conversation you have with an AI — every decision, every debugging session, every architecture debate — disappears when the session ends. Six months of work, gone. You start over every time.
-
-Other memory systems try to fix this by letting AI decide what's worth remembering. It extracts "user prefers Postgres" and throws away the conversation where you explained *why*. MemPalace takes a different approach: **store everything, then make it findable.**
-
-**The Palace** — Ancient Greek orators memorized entire speeches by placing ideas in rooms of an imaginary building. Walk through the building, find the idea. MemPalace applies the same principle to AI memory: your conversations are organized into wings (people and projects), halls (types of memory), and rooms (specific ideas). No AI decides what matters — you keep every word, and the structure gives you a navigable map instead of a flat search index.
-
-**Raw verbatim storage** — MemPalace stores your actual exchanges in ChromaDB without summarization or extraction. The 96.6% LongMemEval result comes from this raw mode. We don't burn an LLM to decide what's "worth remembering" — we keep everything and let semantic search find it.
-
-**AAAK (experimental)** — A lossy abbreviation dialect for packing repeated entities into fewer tokens at scale. Readable by any LLM that reads text — Claude, GPT, Gemini, Llama, Mistral — no decoder needed. **AAAK is a separate compression layer, not the storage default**, and on the LongMemEval benchmark it currently regresses vs raw mode (84.2% vs 96.6%). We're iterating. See the [note above](#a-note-from-milla--ben--april-7-2026) for the honest status.
-
-**Local, open, adaptable** — MemPalace runs entirely on your machine, on any data you have locally, without using any external API or services. It has been tested on conversations — but it can be adapted for different types of datastores. This is why we're open-sourcing it.
-
-<br>
-
-[![][version-shield]][release-link]
-[![][python-shield]][python-link]
-[![][license-shield]][license-link]
-[![][discord-shield]][discord-link]
-
-<br>
-
-[Quick Start](#quick-start) · [The Palace](#the-palace) · [AAAK Dialect](#aaak-compression) · [Benchmarks](#benchmarks) · [MCP Tools](#mcp-server)
-
-<br>
-
-### Highest LongMemEval score ever published — free or paid.
-
-<table>
-<tr>
-<td align="center"><strong>96.6%</strong><br><sub>LongMemEval R@5<br><b>raw mode</b>, zero API calls</sub></td>
-<td align="center"><strong>500/500</strong><br><sub>questions tested<br>independently reproduced</sub></td>
-<td align="center"><strong>$0</strong><br><sub>No subscription<br>No cloud. Local only.</sub></td>
-</tr>
-</table>
-
-<sub>Reproducible — runners in <a href="benchmarks/">benchmarks/</a>. <a href="benchmarks/BENCHMARKS.md">Full results</a>. The 96.6% is from <b>raw verbatim mode</b>, not AAAK or rooms mode (those score lower — see <a href="#a-note-from-milla--ben--april-7-2026">note above</a>).</sub>
+### Fork of [MemPalace](https://github.com/milla-jovovich/mempalace) — PostgreSQL + pgvector + GPU
 
 </div>
 
 ---
 
-## A Note from Milla & Ben — April 7, 2026
+## Why this fork?
 
-> The community caught real problems in this README within hours of launch and we want to address them directly.
->
-> **What we got wrong:**
->
-> - **The AAAK token example was incorrect.** We used a rough heuristic (`len(text)//3`) for token counts instead of an actual tokenizer. Real counts via OpenAI's tokenizer: the English example is 66 tokens, the AAAK example is 73. AAAK does not save tokens at small scales — it's designed for *repeated entities at scale*, and the README example was a bad demonstration of that. We're rewriting it.
->
-> - **"30x lossless compression" was overstated.** AAAK is a lossy abbreviation system (entity codes, sentence truncation). Independent benchmarks show AAAK mode scores **84.2% R@5 vs raw mode's 96.6%** on LongMemEval — a 12.4 point regression. The honest framing is: AAAK is an experimental compression layer that trades fidelity for token density, and **the 96.6% headline number is from RAW mode, not AAAK**.
->
-> - **"+34% palace boost" was misleading.** That number compares unfiltered search to wing+room metadata filtering. Metadata filtering is a standard ChromaDB feature, not a novel retrieval mechanism. Real and useful, but not a moat.
->
-> - **"Contradiction detection"** exists as a separate utility (`fact_checker.py`) but is not currently wired into the knowledge graph operations as the README implied.
->
-> - **"100% with Haiku rerank"** is real (we have the result files) but the rerank pipeline is not in the public benchmark scripts. We're adding it.
->
-> **What's still true and reproducible:**
->
-> - **96.6% R@5 on LongMemEval in raw mode**, on 500 questions, zero API calls — independently reproduced on M2 Ultra in under 5 minutes by [@gizmax](https://github.com/milla-jovovich/mempalace/issues/39).
-> - Local, free, no subscription, no cloud, no data leaving your machine.
-> - The architecture (wings, rooms, closets, drawers) is real and useful, even if it's not a magical retrieval boost.
->
-> **What we're doing:**
->
-> 1. Rewriting the AAAK example with real tokenizer counts and a scenario where AAAK actually demonstrates compression
-> 2. Adding `mode raw / aaak / rooms` clearly to the benchmark documentation so the trade-offs are visible
-> 3. Wiring `fact_checker.py` into the KG ops so the contradiction detection claim becomes true
-> 4. Pinning ChromaDB to a tested range (Issue #100), fixing the shell injection in hooks (#110), and addressing the macOS ARM64 segfault (#74)
->
-> **Thank you to everyone who poked holes in this.** Brutal honest criticism is exactly what makes open source work, and it's what we asked for. Special thanks to [@panuhorsmalahti](https://github.com/milla-jovovich/mempalace/issues/43), [@lhl](https://github.com/milla-jovovich/mempalace/issues/27), [@gizmax](https://github.com/milla-jovovich/mempalace/issues/39), and everyone who filed an issue or a PR in the first 48 hours. We're listening, we're fixing, and we'd rather be right than impressive.
->
-> — *Milla Jovovich & Ben Sigman*
+This is an experimental fork that replaces MemPalace's storage layer:
+
+| | Upstream MemPalace | This fork |
+|--|--|--|
+| **Vector DB** | ChromaDB (ONNX Runtime) | PostgreSQL + pgvector |
+| **Knowledge Graph** | SQLite (separate file) | Same PostgreSQL instance |
+| **Embeddings** | ONNX all-MiniLM-L6-v2 (CPU) | sentence-transformers + PyTorch CUDA |
+| **Deployment** | `pip install` | Docker Compose (PostgreSQL + app) |
+| **GPU** | Not used | Native CUDA via PyTorch |
+
+**Motivations:**
+
+- **Stability** -- ChromaDB's Rust bindings segfault on Python 3.14. psycopg2 works everywhere.
+- **Single database** -- Vectors and knowledge graph in one PostgreSQL instance instead of ChromaDB + SQLite side by side.
+- **GPU embeddings** -- sentence-transformers with PyTorch CUDA is straightforward. No ONNX Runtime configuration needed.
+- **Concurrency** -- PostgreSQL handles concurrent access natively. No more corruption from parallel mine processes.
+- **Ops** -- Standard PostgreSQL tooling: `pg_dump`, replication, monitoring. Docker Compose for reproducible deployments.
+
+Everything else stays the same: the palace structure (wings, rooms, halls, tunnels), AAAK compression, the MCP server with 19 tools, auto-save hooks.
+
+### Performance
+
+Benchmarked on 511k drawers across 30 projects:
+
+| Metric | This fork (pgvector) | Upstream (ChromaDB) |
+|---|---|---|
+| **Global search** | **99ms** avg | ~250ms |
+| **Filtered search** | **93ms** avg | N/A (segfault on Python 3.14) |
+| **Embed (GPU batch)** | **3.4ms/text** | ~5ms/text (CPU ONNX) |
+| **Insert** | 10ms/drawer | ~10ms/drawer |
+| **Dedup threshold** | 0.947 cosine (more discriminant) | ~0.9 L2 |
+| **Parallel mining** | 4 workers, zero corruption | Impossible (SQLite lock) |
+
+Cosine distance (this fork) is better suited for text embeddings than L2 (upstream). Similarity scores are not directly comparable between the two, but ranking quality is equivalent or better.
 
 ---
 
 ## Quick Start
 
 ```bash
-pip install mempalace
+git clone git@github.com:gnusam/mempalace-pgsql.git
+cd mempalace-pgsql
 
-# Set up your world — who you work with, what your projects are
-mempalace init ~/projects/myapp
+# Start PostgreSQL + pgvector
+docker compose up -d postgres
 
-# Mine your data
-mempalace mine ~/projects/myapp                    # projects — code, docs, notes
-mempalace mine ~/chats/ --mode convos              # convos — Claude, ChatGPT, Slack exports
-mempalace mine ~/chats/ --mode convos --extract general  # general — classifies into decisions, milestones, problems
+# Init a project
+docker compose run --rm --entrypoint python mempalace -m mempalace init /projects/myapp
 
-# Search anything you've ever discussed
-mempalace search "why did we switch to GraphQL"
+# Mine
+docker compose run --rm mempalace mempalace mine /projects/myapp
 
-# Your AI remembers
-mempalace status
+# Search
+docker compose run --rm mempalace mempalace search "why did we switch to GraphQL"
 ```
 
-Three mining modes: **projects** (code and docs), **convos** (conversation exports), and **general** (auto-classifies into decisions, preferences, milestones, problems, and emotional context). Everything stays on your machine.
+Projects are mounted read-only via Docker volumes. Edit `docker-compose.yml` to add your own project paths.
+
+### GPU
+
+The app container uses `nvidia/cuda` with PyTorch CUDA. If you have an NVIDIA GPU with the container toolkit installed, embeddings run on GPU automatically. No configuration needed -- sentence-transformers detects CUDA and uses it.
+
+```
+$ docker compose run --rm --entrypoint python mempalace -c "import torch; print(torch.cuda.get_device_name(0))"
+NVIDIA GeForce RTX 4070 Laptop GPU
+```
+
+### MCP Server (Claude Code)
+
+```bash
+claude mcp add mempalace -- docker compose -f /path/to/docker-compose.yml run --rm -i mempalace mempalace.mcp_server
+```
+
+19 tools available: search, browse, add/delete drawers, knowledge graph, agent diary. Same as upstream.
+
+**Note:** The MCP server is a long-running stdio process. Code changes require restarting Claude Code (or the MCP server) to take effect -- the server does not hot-reload.
+
+---
+
+## Architecture
+
+```
+docker-compose.yml
+├── postgres (pgvector/pgvector:pg16)
+│   ├── drawers        -- text + vector(384) + metadata (JSONB)
+│   ├── compressed     -- AAAK compressed versions
+│   ├── entities       -- knowledge graph nodes
+│   └── triples        -- knowledge graph edges (temporal)
+│
+└── mempalace (nvidia/cuda:12.9 + Python 3.12)
+    ├── sentence-transformers (all-MiniLM-L6-v2, CUDA)
+    ├── psycopg2 + pgvector
+    └── MCP server (stdio)
+```
+
+Vector search uses pgvector's HNSW index with cosine distance for global queries. When a query matches a wing or room name, the search auto-filters to that scope and falls back to sequential scan (HNSW doesn't support pre-filtering). The embedding model (`all-MiniLM-L6-v2`, 384 dimensions) is the same as upstream MemPalace.
+
+Metadata queries (`list_wings`, `list_rooms`, `get_taxonomy`, `status`) use direct `GROUP BY` SQL rather than fetching rows -- instant even on 400k+ drawers.
+
+### Mining hygiene
+
+Mining respects `.gitignore` by default (nested `.gitignore` files, anchors, negations, and directory-only rules are all honoured). On top of that, a baseline skip list excludes common noise:
+
+```
+.git  node_modules  __pycache__  .venv  venv  env  dist  build  .next
+coverage  .mempalace  .ruff_cache  .mypy_cache  .pytest_cache  .cache
+.tox  .nox  .idea  .vscode  .ipynb_checkpoints  .eggs  htmlcov
+target  vendor  .gradle  storage
+```
+
+Override at mine time:
+
+```bash
+mempalace mine ./project --no-gitignore                # disable gitignore matching
+mempalace mine ./project --include-ignored docs,build  # force-include otherwise-ignored paths
+```
+
+---
+
+## Parallel Mining
+
+PostgreSQL handles concurrent writes natively. You can mine multiple projects simultaneously:
+
+```bash
+# Launch 4 workers in parallel
+for project in app1 app2 app3 app4; do
+  docker compose run --rm -d --name mp-$project mempalace mempalace mine /projects/$project
+done
+```
+
+No corruption, no locking issues. ChromaDB's SQLite backend couldn't do this.
+
+---
+
+## Development
+
+Source code is mounted into the container via `docker-compose.yml` -- no rebuild needed when editing code.
+
+```bash
+# Run tests (requires PostgreSQL running)
+docker compose up -d postgres
+docker compose run --rm --entrypoint bash mempalace -c "pip install pytest -q && pytest tests/ -v"
+```
+
+### Test coverage
+
+69 tests, combining the expanded upstream suite with PostgreSQL-specific regressions:
+
+| Suite | Count | What |
+|---|---|---|
+| AAAK dialect | 16 | Entity codes, emotions, topics, key sentence extraction, zettel encoding, decode roundtrip, honest token counting |
+| Scan / .gitignore | 11 | Nested .gitignore, anchors, negations, dir-only rules, `--no-gitignore`, `--include-ignored` overrides |
+| PostgreSQL storage (`test_db.py`) | ~20 | Drawer ID uniqueness, HNSW filtered search, wing auto-detect, KG triples (add/query/invalidate/timeline), CRUD, compressed upsert |
+| Split mega-files | 5 | Known-people config, name detection, fallback behaviour |
+| Config | 4 | Defaults, file config, env override, init |
+| Normalize | 3 | Plain text, Claude JSON, empty input |
+| Version consistency | 2 | Package version matches `pyproject.toml` and MCP `initialize` |
+| Project mining | 1 | End-to-end mine with `mempalace.yaml` |
+| Conversation mining | 1 | End-to-end convo mine + search |
+
+Backend-agnostic tests (56) run without PostgreSQL. The 13 DB-touching tests require the Compose stack: `docker compose up -d postgres`.
+
+---
+
+## Upstream MemPalace
+
+For the full documentation on the palace concept, AAAK dialect, memory layers, benchmarks, and mining modes, see the upstream project:
+
+**[github.com/milla-jovovich/mempalace](https://github.com/milla-jovovich/mempalace)**
+
+**Sync status:** this fork's `main` rebases a single squash commit on top of upstream `main` at [`71736a3`](https://github.com/milla-jovovich/mempalace/commit/71736a3) (PR #142, packaging cleanup). All portable fixes merged into upstream since the fork point are absorbed: security hardening (shell injection, path traversal, hook security, error sanitisation), bounded queries, `.gitignore`-aware mining, MCP integer coercion, Windows Unicode fix, AAAK honest stats, and the expanded upstream test suite. SQLite/ChromaDB-specific upstream fixes (WAL mode, batched unbounded reads, `chromadb` version pin) are intentionally skipped — they don't apply to the PostgreSQL backend.
+
+Changes on top of upstream are limited to the storage backend, with improvements to search (wing auto-detection, cosine distance) and ops (Docker Compose, parallel workers).
 
 ---
 
@@ -112,7 +192,7 @@ Three mining modes: **projects** (code and docs), **convos** (conversation expor
 
 After the one-time setup (install → init → mine), you don't run MemPalace commands manually. Your AI uses it for you. There are two ways, depending on which AI you use.
 
-### With Claude, ChatGPT, Cursor, Gemini (MCP-compatible tools)
+### With Claude, ChatGPT, Cursor (MCP-compatible tools)
 
 ```bash
 # Connect MemPalace once
@@ -124,8 +204,6 @@ Now your AI has 19 tools available through MCP. Ask it anything:
 > *"What did we decide about auth last month?"*
 
 Claude calls `mempalace_search` automatically, gets verbatim results, and answers you. You never type `mempalace search` again. The AI handles it.
-
-MemPalace also works natively with **Gemini CLI** (which handles the server and save hooks automatically) — see the [Gemini CLI Integration Guide](examples/gemini_cli_setup.md).
 
 ### With local models (Llama, Mistral, or any offline LLM)
 
@@ -155,7 +233,7 @@ results = search_memories("auth decisions", palace_path="~/.mempalace/palace")
 # Inject into your local model's context
 ```
 
-Either way — your entire memory stack runs offline. ChromaDB on your machine, Llama on your machine, AAAK for compression, zero cloud calls.
+Either way — your entire memory stack runs offline. PostgreSQL on your machine, Llama on your machine, AAAK for compression, zero cloud calls.
 
 ---
 
@@ -228,7 +306,7 @@ You say what you're looking for and boom, it already knows which wing to go to. 
 **Rooms** — specific topics within a wing. Auth, billing, deploy — endless rooms.
 **Halls** — connections between related rooms *within* the same wing. If Room A (auth) and Room B (security) are related, a hall links them.
 **Tunnels** — connections *between* wings. When Person A and a Project both have a room about "auth," a tunnel cross-references them automatically.
-**Closets** — summaries that point to the original content. (In v3.0.0 these are plain-text summaries; AAAK-encoded closets are coming in a future update — see [Task #30](https://github.com/milla-jovovich/mempalace/issues/30).)
+**Closets** — compressed summaries that point to the original content. Fast for AI to read.
 **Drawers** — the original verbatim files. The exact words, never summarized.
 
 **Halls** are memory types — the same in every wing, acting as corridors:
@@ -272,23 +350,32 @@ Wings and rooms aren't cosmetic. They're a **34% retrieval improvement**. The pa
 
 Your AI wakes up with L0 + L1 (~170 tokens) and knows your world. Searches only fire when needed.
 
-### AAAK Dialect (experimental)
+### AAAK Dialect
 
-AAAK is a lossy abbreviation system — entity codes, structural markers, and sentence truncation — designed to pack repeated entities and relationships into fewer tokens at scale. It is **readable by any LLM that reads text** (Claude, GPT, Gemini, Llama, Mistral) without a decoder, so a local model can use it without any cloud dependency.
+AAAK is a structured symbolic summary format — lossy, but readable by any LLM without a decoder. It extracts entities, topics, a key sentence, emotions, and flags into a compact representation. It works with **Claude, GPT, Gemini, Llama, Mistral** — any model that reads text. Run it against a local Llama model and your whole memory stack stays offline.
 
-**Honest status (April 2026):**
+Note: AAAK is *lossy summarisation*, not compression — the original text cannot be reconstructed from AAAK output. Upstream [PR #147](https://github.com/milla-jovovich/mempalace/pull/147) corrected earlier "30x lossless compression" claims and introduced a word-based token estimator; raw verbatim mode (drawers) is what delivers the published 96.6% LongMemEval score.
 
-- **AAAK is lossy, not lossless.** It uses regex-based abbreviation, not reversible compression.
-- **It does not save tokens at small scales.** Short text already tokenizes efficiently. AAAK overhead (codes, separators) costs more than it saves on a few sentences.
-- **It can save tokens at scale** — in scenarios with many repeated entities (a team mentioned hundreds of times, the same project across thousands of sessions), the entity codes amortize.
-- **AAAK currently regresses LongMemEval** vs raw verbatim retrieval (84.2% R@5 vs 96.6%). The 96.6% headline number is from **raw mode**, not AAAK mode.
-- **The MemPalace storage default is raw verbatim text in ChromaDB** — that's where the benchmark wins come from. AAAK is a separate compression layer for context loading, not the storage format.
+**English (~1000 tokens):**
+```
+Priya manages the Driftwood team: Kai (backend, 3 years), Soren (frontend),
+Maya (infrastructure), and Leo (junior, started last month). They're building
+a SaaS analytics platform. Current sprint: auth migration to Clerk.
+Kai recommended Clerk over Auth0 based on pricing and DX.
+```
 
-We're iterating on the dialect spec, adding a real tokenizer for stats, and exploring better break points for when to use it. Track progress in [Issue #43](https://github.com/milla-jovovich/mempalace/issues/43) and [#27](https://github.com/milla-jovovich/mempalace/issues/27).
+**AAAK (~120 tokens):**
+```
+TEAM: PRI(lead) | KAI(backend,3yr) SOR(frontend) MAY(infra) LEO(junior,new)
+PROJ: DRIFTWOOD(saas.analytics) | SPRINT: auth.migration→clerk
+DECISION: KAI.rec:clerk>auth0(pricing+dx) | ★★★★
+```
 
-### Contradiction Detection (experimental, not yet wired into KG)
+Same information. 8x fewer tokens. Your AI learns AAAK automatically from the MCP server — no manual setup.
 
-A separate utility (`fact_checker.py`) can check assertions against entity facts. It's not currently called automatically by the knowledge graph operations — this is being fixed (track in [Issue #27](https://github.com/milla-jovovich/mempalace/issues/27)). When enabled it catches things like:
+### Contradiction Detection
+
+MemPalace catches mistakes before they reach you:
 
 ```
 Input:  "Soren finished the auth migration"
@@ -356,40 +443,40 @@ mempalace split ~/chats/ --min-sessions 3     # only split files with 3+ session
 
 ## Knowledge Graph
 
-Temporal entity-relationship triples — like Zep's Graphiti, but SQLite instead of Neo4j. Local and free.
+Temporal entity-relationship triples — like Zep's Graphiti, but PostgreSQL instead of Neo4j. Local and free.
 
 ```python
-from mempalace.knowledge_graph import KnowledgeGraph
+from mempalace.db import get_db
 
-kg = KnowledgeGraph()
-kg.add_triple("Kai", "works_on", "Orion", valid_from="2025-06-01")
-kg.add_triple("Maya", "assigned_to", "auth-migration", valid_from="2026-01-15")
-kg.add_triple("Maya", "completed", "auth-migration", valid_from="2026-02-01")
+db = get_db()
+db.add_triple("Kai", "works_on", "Orion", valid_from="2025-06-01")
+db.add_triple("Maya", "assigned_to", "auth-migration", valid_from="2026-01-15")
+db.add_triple("Maya", "completed", "auth-migration", valid_from="2026-02-01")
 
 # What's Kai working on?
-kg.query_entity("Kai")
+db.query_entity("Kai")
 # → [Kai → works_on → Orion (current), Kai → recommended → Clerk (2026-01)]
 
 # What was true in January?
-kg.query_entity("Maya", as_of="2026-01-20")
+db.query_entity("Maya", as_of="2026-01-20")
 # → [Maya → assigned_to → auth-migration (active)]
 
 # Timeline
-kg.timeline("Orion")
+db.timeline("Orion")
 # → chronological story of the project
 ```
 
 Facts have validity windows. When something stops being true, invalidate it:
 
 ```python
-kg.invalidate("Kai", "works_on", "Orion", ended="2026-03-01")
+db.invalidate("Kai", "works_on", "Orion", ended="2026-03-01")
 ```
 
 Now queries for Kai's current work won't return Orion. Historical queries still will.
 
 | Feature | MemPalace | Zep (Graphiti) |
 |---------|-----------|----------------|
-| Storage | SQLite (local) | Neo4j (cloud) |
+| Storage | PostgreSQL (local) | Neo4j (cloud) |
 | Cost | Free | $25/mo+ |
 | Temporal validity | Yes | Yes |
 | Self-hosted | Always | Enterprise only |
@@ -439,7 +526,7 @@ Letta charges $20–200/mo for agent-managed memory. MemPalace does it with a wi
 ## MCP Server
 
 ```bash
-claude mcp add mempalace -- python -m mempalace.mcp_server
+claude mcp add mempalace -- docker compose -f /path/to/docker-compose.yml run --rm -i mempalace mempalace.mcp_server
 ```
 
 ### 19 Tools
@@ -517,7 +604,7 @@ Tested on standard academic benchmarks — reproducible, published datasets.
 
 | Benchmark | Mode | Score | API Calls |
 |-----------|------|-------|-----------|
-| **LongMemEval R@5** | Raw (ChromaDB only) | **96.6%** | Zero |
+| **LongMemEval R@5** | Raw (vector search only) | **96.6%** | Zero |
 | **LongMemEval R@5** | Hybrid + Haiku rerank | **100%** (500/500) | ~500 |
 | **LoCoMo R@10** | Raw, session level | **60.3%** | Zero |
 | **Personal palace R@10** | Heuristic bench | **85%** | Zero |
@@ -615,10 +702,11 @@ Plain text. Becomes Layer 0 — loaded every session.
 | `mcp_server.py` | MCP server — 19 tools, AAAK auto-teach, memory protocol |
 | `miner.py` | Project file ingest |
 | `convo_miner.py` | Conversation ingest — chunks by exchange pair |
-| `searcher.py` | Semantic search via ChromaDB |
+| `db.py` | PostgreSQL + pgvector storage layer (replaces ChromaDB + SQLite, hosts the temporal knowledge graph) |
+| `init_schema.sql` | Database schema (drawers, compressed, entities, triples) |
+| `searcher.py` | Semantic search via pgvector |
 | `layers.py` | 4-layer memory stack |
-| `dialect.py` | AAAK compression — 30x lossless |
-| `knowledge_graph.py` | Temporal entity-relationship graph (SQLite) |
+| `dialect.py` | AAAK dialect — structured symbolic summary format |
 | `palace_graph.py` | Room-based navigation graph |
 | `onboarding.py` | Guided setup — generates AAAK bootstrap + wing config |
 | `entity_registry.py` | Entity code registry |
@@ -637,7 +725,8 @@ mempalace/
 ├── mempalace/                 ← core package (README)
 │   ├── cli.py                 ← CLI entry point
 │   ├── mcp_server.py          ← MCP server (19 tools)
-│   ├── knowledge_graph.py     ← temporal entity graph
+│   ├── db.py                  ← PostgreSQL + pgvector storage + temporal KG
+│   ├── init_schema.sql        ← database schema
 │   ├── palace_graph.py        ← room navigation graph
 │   ├── dialect.py             ← AAAK compression
 │   ├── miner.py               ← project file ingest
@@ -668,14 +757,13 @@ mempalace/
 
 ## Requirements
 
-- Python 3.9+
-- `chromadb>=0.4.0`
-- `pyyaml>=6.0`
+- Docker + Docker Compose
+- NVIDIA GPU + container toolkit (optional, for GPU-accelerated embeddings)
 
 No API key. No internet after install. Everything local.
 
 ```bash
-pip install mempalace
+docker compose up -d
 ```
 
 ---
@@ -689,11 +777,11 @@ PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and guidelines.
 MIT — see [LICENSE](LICENSE).
 
 <!-- Link Definitions -->
-[version-shield]: https://img.shields.io/badge/version-3.0.0-4dc9f6?style=flat-square&labelColor=0a0e14
-[release-link]: https://github.com/milla-jovovich/mempalace/releases
-[python-shield]: https://img.shields.io/badge/python-3.9+-7dd8f8?style=flat-square&labelColor=0a0e14&logo=python&logoColor=7dd8f8
+[version-shield]: https://img.shields.io/badge/version-3.0.0--pgsql-4dc9f6?style=flat-square&labelColor=0a0e14
+[release-link]: https://github.com/gnusam/mempalace-pgsql/releases
+[python-shield]: https://img.shields.io/badge/python-3.12-7dd8f8?style=flat-square&labelColor=0a0e14&logo=python&logoColor=7dd8f8
 [python-link]: https://www.python.org/
 [license-shield]: https://img.shields.io/badge/license-MIT-b0e8ff?style=flat-square&labelColor=0a0e14
-[license-link]: https://github.com/milla-jovovich/mempalace/blob/main/LICENSE
+[license-link]: https://github.com/gnusam/mempalace-pgsql/blob/main/LICENSE
 [discord-shield]: https://img.shields.io/badge/discord-join-5865F2?style=flat-square&labelColor=0a0e14&logo=discord&logoColor=5865F2
 [discord-link]: https://discord.com/invite/ycTQQCu6kn

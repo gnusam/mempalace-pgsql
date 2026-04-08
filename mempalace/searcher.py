@@ -2,36 +2,29 @@
 """
 searcher.py — Find anything. Exact words.
 
-Semantic search against the palace.
+Semantic search against the palace (PostgreSQL + pgvector).
 Returns verbatim text — the actual words, never summaries.
 """
 
 import logging
 from pathlib import Path
 
-import chromadb
+from .db import get_db
 
 logger = logging.getLogger("mempalace_mcp")
 
 
 class SearchError(Exception):
-    """Raised when search cannot proceed (e.g. no palace found)."""
+    """Raised when search cannot proceed (e.g. query failure)."""
 
 
-def search(query: str, palace_path: str, wing: str = None, room: str = None, n_results: int = 5):
+def search(query: str, palace_path: str = None, wing: str = None, room: str = None, n_results: int = 5):
     """
     Search the palace. Returns verbatim drawer content.
     Optionally filter by wing (project) or room (aspect).
     """
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-    except Exception:
-        print(f"\n  No palace found at {palace_path}")
-        print("  Run: mempalace init <dir> then mempalace mine <dir>")
-        raise SearchError(f"No palace found at {palace_path}")
+    db = get_db()
 
-    # Build where filter
     where = {}
     if wing and room:
         where = {"$and": [{"wing": wing}, {"room": room}]}
@@ -41,16 +34,7 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
         where = {"room": room}
 
     try:
-        kwargs = {
-            "query_texts": [query],
-            "n_results": n_results,
-            "include": ["documents", "metadatas", "distances"],
-        }
-        if where:
-            kwargs["where"] = where
-
-        results = col.query(**kwargs)
-
+        results = db.query(query, n_results=n_results, where=where)
     except Exception as e:
         print(f"\n  Search error: {e}")
         raise SearchError(f"Search error: {e}") from e
@@ -81,7 +65,6 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
         print(f"      Source: {source}")
         print(f"      Match:  {similarity}")
         print()
-        # Print the verbatim text, indented
         for line in doc.strip().split("\n"):
             print(f"      {line}")
         print()
@@ -91,23 +74,14 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
 
 
 def search_memories(
-    query: str, palace_path: str, wing: str = None, room: str = None, n_results: int = 5
+    query: str, palace_path: str = None, wing: str = None, room: str = None, n_results: int = 5
 ) -> dict:
     """
     Programmatic search — returns a dict instead of printing.
     Used by the MCP server and other callers that need data.
     """
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-    except Exception as e:
-        logger.error("No palace found at %s: %s", palace_path, e)
-        return {
-            "error": "No palace found",
-            "hint": "Run: mempalace init <dir> && mempalace mine <dir>",
-        }
+    db = get_db()
 
-    # Build where filter
     where = {}
     if wing and room:
         where = {"$and": [{"wing": wing}, {"room": room}]}
@@ -117,17 +91,10 @@ def search_memories(
         where = {"room": room}
 
     try:
-        kwargs = {
-            "query_texts": [query],
-            "n_results": n_results,
-            "include": ["documents", "metadatas", "distances"],
-        }
-        if where:
-            kwargs["where"] = where
-
-        results = col.query(**kwargs)
+        results = db.query(query, n_results=n_results, where=where)
     except Exception as e:
-        return {"error": f"Search error: {e}"}
+        logger.error("Search error: %s", e)
+        return {"error": "Search failed", "hint": "Check that PostgreSQL is running and the palace has been mined."}
 
     docs = results["documents"][0]
     metas = results["metadatas"][0]

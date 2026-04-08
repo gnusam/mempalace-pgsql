@@ -17,7 +17,7 @@ Outputs:
 - JSONL log compatible with LongMemEval's evaluation scripts
 
 Modes:
-    raw     — baseline: raw text into ChromaDB (default)
+    raw     — baseline: raw text into vector store (default)
     aaak    — AAAK dialect compression before ingestion
     rooms   — topic-based room detection + room-filtered search
 
@@ -39,10 +39,82 @@ from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
 
-import chromadb
+import numpy as np
 
 # Add mempal to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from mempalace.db import PalaceDB, get_db, embed
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://mempalace:mempalace@localhost:5433/mempalace")
+
+
+# ── In-memory vector collection (replaces ChromaDB EphemeralClient) ──────────
+class _BenchCollection:
+    """Lightweight in-memory vector store using mempalace.db embed()."""
+
+    def __init__(self):
+        self._docs = []
+        self._ids = []
+        self._metas = []
+        self._embeddings = []
+
+    def add(self, documents, ids, metadatas=None, embeddings=None):
+        self._docs.extend(documents)
+        self._ids.extend(ids)
+        if metadatas:
+            self._metas.extend(metadatas)
+        else:
+            self._metas.extend([{} for _ in documents])
+        if embeddings is not None:
+            self._embeddings.extend([np.array(e, dtype=np.float32) for e in embeddings])
+        else:
+            self._embeddings.extend(embed(documents))
+
+    def query(self, query_texts=None, query_embeddings=None, n_results=5, include=None, where=None):
+        if not self._embeddings:
+            return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+        if query_embeddings is not None:
+            q_emb = np.array(query_embeddings[0], dtype=np.float32)
+        else:
+            q_emb = embed(query_texts[:1])[0]
+        indices = list(range(len(self._docs)))
+        if where:
+            filtered = []
+            for i in indices:
+                match = True
+                for k, v in where.items():
+                    if k.startswith("$"):
+                        continue
+                    meta_val = self._metas[i].get(k)
+                    if isinstance(v, dict) and "$in" in v:
+                        if meta_val not in v["$in"]:
+                            match = False
+                    elif meta_val != v:
+                        match = False
+                if match:
+                    filtered.append(i)
+            indices = filtered
+        emb_matrix = np.array([self._embeddings[i] for i in indices], dtype=np.float32)
+        if len(emb_matrix) == 0:
+            return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+        norms_m = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+        norm_q = np.linalg.norm(q_emb)
+        norms_m[norms_m == 0] = 1
+        if norm_q == 0:
+            norm_q = 1
+        cosine_sim = emb_matrix @ q_emb / (norms_m.squeeze() * norm_q)
+        distances = 1.0 - cosine_sim
+        top_k = min(n_results, len(indices))
+        top_idx = np.argsort(distances)[:top_k]
+        out_ids = [self._ids[indices[i]] for i in top_idx]
+        out_docs = [self._docs[indices[i]] for i in top_idx]
+        out_metas = [self._metas[indices[i]] for i in top_idx]
+        out_dists = [float(distances[i]) for i in top_idx]
+        return {"ids": [out_ids], "documents": [out_docs], "metadatas": [out_metas], "distances": [out_dists]}
+
+    def count(self):
+        return len(self._docs)
 
 
 # =============================================================================
@@ -90,69 +162,12 @@ def session_id_from_corpus_id(corpus_id):
 
 # =============================================================================
 # SHARED EPHEMERAL CLIENT
-# EphemeralClient instances share state in this ChromaDB version — use one
-# shared client and delete+recreate the collection between queries.
+# In-memory vector store — create a fresh _BenchCollection between queries.
 # =============================================================================
 
-_bench_client = chromadb.EphemeralClient()
-
-# Global embedding function — set by --embed-model arg before benchmark runs.
-# None = use ChromaDB default (all-MiniLM-L6-v2).
-_bench_embed_fn = None
-
-
-def _make_embed_fn(model_name: str):
-    """
-    Return a ChromaDB-compatible embedding function for the given model.
-
-    Supported:
-        default   — ChromaDB default (all-MiniLM-L6-v2, 384-dim)
-        bge-base  — BAAI/bge-base-en-v1.5 (768-dim) via fastembed
-        bge-large — BAAI/bge-large-en-v1.5 (1024-dim) via fastembed
-        nomic     — nomic-ai/nomic-embed-text-v1.5 (768-dim) via fastembed
-        mxbai     — mixedbread-ai/mxbai-embed-large-v1 (1024-dim) via fastembed
-    """
-    if model_name == "default" or not model_name:
-        return None  # ChromaDB default
-
-    MODEL_MAP = {
-        "bge-base": "BAAI/bge-base-en-v1.5",
-        "bge-large": "BAAI/bge-large-en-v1.5",
-        "nomic": "nomic-ai/nomic-embed-text-v1.5",
-        "mxbai": "mixedbread-ai/mxbai-embed-large-v1",
-    }
-    hf_name = MODEL_MAP.get(model_name, model_name)
-
-    try:
-        from fastembed import TextEmbedding
-        from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
-
-        class _FastEmbedFn(EmbeddingFunction):
-            def __init__(self, name):
-                print(f"  Loading embedding model: {name} (first run downloads ~300-1300MB)...")
-                self._model = TextEmbedding(name)
-                print("  Model ready.")
-
-            def __call__(self, input: Documents) -> Embeddings:
-                return [list(vec) for vec in self._model.embed(input)]
-
-        return _FastEmbedFn(hf_name)
-    except ImportError:
-        print("ERROR: fastembed not installed. Run: pip install fastembed")
-        print("       Falling back to default embedding model.")
-        return None
-
-
 def _fresh_collection(name="mempal_drawers"):
-    """Delete and recreate collection for a clean slate between queries."""
-    global _bench_embed_fn
-    try:
-        _bench_client.delete_collection(name)
-    except Exception:
-        pass
-    if _bench_embed_fn is not None:
-        return _bench_client.create_collection(name, embedding_function=_bench_embed_fn)
-    return _bench_client.create_collection(name)
+    """Create a fresh in-memory vector collection for benchmark isolation."""
+    return _BenchCollection()
 
 
 # =============================================================================
@@ -232,7 +247,7 @@ def build_palace_and_retrieve(entry, granularity="session", n_results=50):
     doc_id_to_idx = {f"doc_{i}": i for i in range(len(corpus))}
     ranked_indices = [doc_id_to_idx[rid] for rid in result_ids]
 
-    # Fill in any missing indices (ChromaDB may return fewer than corpus size)
+    # Fill in any missing indices (search may return fewer than corpus size)
     seen = set(ranked_indices)
     for i in range(len(corpus)):
         if i not in seen:
@@ -3315,13 +3330,10 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--embed-model",
-        choices=["default", "bge-base", "bge-large", "nomic", "mxbai"],
         default="default",
-        help="Embedding model. 'default'=all-MiniLM-L6-v2 (ChromaDB built-in, baseline). "
-        "'bge-large'=BAAI/bge-large-en-v1.5 (best local, 1024-dim, ~1.3GB via fastembed). "
-        "'nomic'=nomic-embed-text-v1.5 (768-dim, fast, ~274MB). "
-        "'bge-base'=BAAI/bge-base-en-v1.5 (768-dim, balanced). "
-        "'mxbai'=mxbai-embed-large-v1 (1024-dim). Requires: pip install fastembed.",
+        help="Embedding model (default: uses mempalace.db embed() with all-MiniLM-L6-v2). "
+        "Note: custom embed models are no longer supported after pgvector migration; "
+        "all benchmarks use the same model as PalaceDB.",
     )
     # ── Train / test split ──────────────────────────────────────────────────
     parser.add_argument(
@@ -3379,13 +3391,6 @@ if __name__ == "__main__":
         suffix = "_llmrerank" if args.llm_rerank else ""
         subset_tag = f"_{split_subset}" if split_subset else ""
         args.out = f"benchmarks/results_mempal_{args.mode}{embed_tag}{suffix}{subset_tag}_{args.granularity}_{datetime.now().strftime('%Y%m%d_%H%M')}.jsonl"
-
-    # Set global embedding function before running
-    if args.embed_model != "default":
-        import sys as _sys
-
-        _mod = _sys.modules[__name__]
-        _mod._bench_embed_fn = _make_embed_fn(args.embed_model)
 
     run_benchmark(
         args.data_file,

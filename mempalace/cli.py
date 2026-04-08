@@ -155,88 +155,15 @@ def cmd_status(args):
     status(palace_path=palace_path)
 
 
-def cmd_repair(args):
-    """Rebuild palace vector index from SQLite metadata."""
-    import chromadb
-    import shutil
-
-    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
-
-    if not os.path.isdir(palace_path):
-        print(f"\n  No palace found at {palace_path}")
-        return
-
-    print(f"\n{'=' * 55}")
-    print("  MemPalace Repair")
-    print(f"{'=' * 55}\n")
-    print(f"  Palace: {palace_path}")
-
-    # Try to read existing drawers
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-        total = col.count()
-        print(f"  Drawers found: {total}")
-    except Exception as e:
-        print(f"  Error reading palace: {e}")
-        print("  Cannot recover — palace may need to be re-mined from source files.")
-        return
-
-    if total == 0:
-        print("  Nothing to repair.")
-        return
-
-    # Extract all drawers in batches
-    print("\n  Extracting drawers...")
-    batch_size = 5000
-    all_ids = []
-    all_docs = []
-    all_metas = []
-    offset = 0
-    while offset < total:
-        batch = col.get(limit=batch_size, offset=offset, include=["documents", "metadatas"])
-        all_ids.extend(batch["ids"])
-        all_docs.extend(batch["documents"])
-        all_metas.extend(batch["metadatas"])
-        offset += batch_size
-    print(f"  Extracted {len(all_ids)} drawers")
-
-    # Backup and rebuild
-    backup_path = palace_path + ".backup"
-    if os.path.exists(backup_path):
-        shutil.rmtree(backup_path)
-    print(f"  Backing up to {backup_path}...")
-    shutil.copytree(palace_path, backup_path)
-
-    print("  Rebuilding collection...")
-    client.delete_collection("mempalace_drawers")
-    new_col = client.create_collection("mempalace_drawers")
-
-    filed = 0
-    for i in range(0, len(all_ids), batch_size):
-        batch_ids = all_ids[i : i + batch_size]
-        batch_docs = all_docs[i : i + batch_size]
-        batch_metas = all_metas[i : i + batch_size]
-        new_col.add(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
-        filed += len(batch_ids)
-        print(f"  Re-filed {filed}/{len(all_ids)} drawers...")
-
-    print(f"\n  Repair complete. {filed} drawers rebuilt.")
-    print(f"  Backup saved at {backup_path}")
-    print(f"\n{'=' * 55}\n")
-
-
 def cmd_compress(args):
     """Compress drawers in a wing using AAAK Dialect."""
-    import chromadb
     from .dialect import Dialect
-
-    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    from .db import get_db
 
     # Load dialect (with optional entity config)
     config_path = args.config
     if not config_path:
-        for candidate in ["entities.json", os.path.join(palace_path, "entities.json")]:
+        for candidate in ["entities.json"]:
             if os.path.exists(candidate):
                 config_path = candidate
                 break
@@ -247,40 +174,17 @@ def cmd_compress(args):
     else:
         dialect = Dialect()
 
-    # Connect to palace
+    db = get_db()
+    where = {"wing": args.wing} if args.wing else None
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
-    except Exception:
-        print(f"\n  No palace found at {palace_path}")
-        print("  Run: mempalace init <dir> then mempalace mine <dir>")
+        results = db.get_drawers(where=where, limit=10000)
+    except Exception as e:
+        print(f"\n  Error reading drawers: {e}")
         sys.exit(1)
 
-    # Query drawers in batches to avoid SQLite variable limit (~999)
-    where = {"wing": args.wing} if args.wing else None
-    _BATCH = 500
-    docs, metas, ids = [], [], []
-    offset = 0
-    while True:
-        try:
-            kwargs = {"include": ["documents", "metadatas"], "limit": _BATCH, "offset": offset}
-            if where:
-                kwargs["where"] = where
-            batch = col.get(**kwargs)
-        except Exception as e:
-            if not docs:
-                print(f"\n  Error reading drawers: {e}")
-                sys.exit(1)
-            break
-        batch_docs = batch.get("documents", [])
-        if not batch_docs:
-            break
-        docs.extend(batch_docs)
-        metas.extend(batch.get("metadatas", []))
-        ids.extend(batch.get("ids", []))
-        offset += len(batch_docs)
-        if len(batch_docs) < _BATCH:
-            break
+    docs = results["documents"]
+    metas = results["metadatas"]
+    ids = results["ids"]
 
     if not docs:
         wing_label = f" in wing '{args.wing}'" if args.wing else ""
@@ -321,18 +225,13 @@ def cmd_compress(args):
     # Store compressed versions (unless dry-run)
     if not args.dry_run:
         try:
-            comp_col = client.get_or_create_collection("mempalace_compressed")
             for doc_id, compressed, meta, stats in compressed_entries:
                 comp_meta = dict(meta)
                 comp_meta["compression_ratio"] = round(stats["ratio"], 1)
                 comp_meta["original_tokens"] = stats["original_tokens"]
-                comp_col.upsert(
-                    ids=[doc_id],
-                    documents=[compressed],
-                    metadatas=[comp_meta],
-                )
+                db.upsert_compressed(doc_id, compressed, comp_meta)
             print(
-                f"  Stored {len(compressed_entries)} compressed drawers in 'mempalace_compressed' collection."
+                f"  Stored {len(compressed_entries)} compressed drawers in 'compressed' table."
             )
         except Exception as e:
             print(f"  Error storing compressed drawers: {e}")
@@ -451,12 +350,6 @@ def main():
         help="Only split files containing at least N sessions (default: 2)",
     )
 
-    # repair
-    sub.add_parser(
-        "repair",
-        help="Rebuild palace vector index from stored data (fixes segfaults after corruption)",
-    )
-
     # status
     sub.add_parser("status", help="Show what's been filed")
 
@@ -473,7 +366,6 @@ def main():
         "search": cmd_search,
         "compress": cmd_compress,
         "wake-up": cmd_wakeup,
-        "repair": cmd_repair,
         "status": cmd_status,
     }
     dispatch[args.command](args)

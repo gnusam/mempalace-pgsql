@@ -15,7 +15,7 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
-import chromadb
+from .db import get_db
 
 from .normalize import normalize
 
@@ -211,21 +211,12 @@ def detect_convo_room(content: str) -> str:
 # =============================================================================
 
 
-def get_collection(palace_path: str):
-    os.makedirs(palace_path, exist_ok=True)
-    client = chromadb.PersistentClient(path=palace_path)
-    try:
-        return client.get_collection("mempalace_drawers")
-    except Exception:
-        return client.create_collection("mempalace_drawers")
+def get_db_instance(palace_path: str = None):
+    return get_db()
 
 
-def file_already_mined(collection, source_file: str) -> bool:
-    try:
-        results = collection.get(where={"source_file": source_file}, limit=1)
-        return len(results.get("ids", [])) > 0
-    except Exception:
-        return False
+def file_already_mined(db, source_file: str) -> bool:
+    return db.file_already_mined(source_file)
 
 
 # =============================================================================
@@ -283,12 +274,12 @@ def mine_convos(
     print(f"  Wing:    {wing}")
     print(f"  Source:  {convo_path}")
     print(f"  Files:   {len(files)}")
-    print(f"  Palace:  {palace_path}")
+    print(f"  Palace:  PostgreSQL")
     if dry_run:
         print("  DRY RUN — nothing will be filed")
     print(f"{'-' * 55}\n")
 
-    collection = get_collection(palace_path) if not dry_run else None
+    db = get_db_instance(palace_path) if not dry_run else None
 
     total_drawers = 0
     files_skipped = 0
@@ -298,7 +289,7 @@ def mine_convos(
         source_file = str(filepath)
 
         # Skip if already filed
-        if not dry_run and file_already_mined(collection, source_file):
+        if not dry_run and file_already_mined(db, source_file):
             files_skipped += 1
             continue
 
@@ -356,28 +347,13 @@ def mine_convos(
             chunk_room = chunk.get("memory_type", room) if extract_mode == "general" else room
             if extract_mode == "general":
                 room_counts[chunk_room] += 1
-            drawer_id = f"drawer_{wing}_{chunk_room}_{hashlib.md5((source_file + str(chunk['chunk_index'])).encode(), usedforsecurity=False).hexdigest()[:16]}"
-            try:
-                collection.add(
-                    documents=[chunk["content"]],
-                    ids=[drawer_id],
-                    metadatas=[
-                        {
-                            "wing": wing,
-                            "room": chunk_room,
-                            "source_file": source_file,
-                            "chunk_index": chunk["chunk_index"],
-                            "added_by": agent,
-                            "filed_at": datetime.now().isoformat(),
-                            "ingest_mode": "convos",
-                            "extract_mode": extract_mode,
-                        }
-                    ],
-                )
+            result = db.add_drawer(
+                wing=wing, room=chunk_room, content=chunk["content"],
+                source_file=source_file, chunk_index=chunk["chunk_index"],
+                agent=agent, metadata={"ingest_mode": "convos", "extract_mode": extract_mode},
+            )
+            if result:
                 drawers_added += 1
-            except Exception as e:
-                if "already exists" not in str(e).lower():
-                    raise
 
         total_drawers += drawers_added
         print(f"  ✓ [{i:4}/{len(files)}] {filepath.name[:50]:50} +{drawers_added}")

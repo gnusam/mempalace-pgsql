@@ -24,8 +24,6 @@ import sys
 import json
 import re
 import string
-import shutil
-import tempfile
 import argparse
 import urllib.request
 import urllib.error
@@ -33,50 +31,90 @@ from pathlib import Path
 from collections import Counter, defaultdict
 from datetime import datetime
 
-import chromadb
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# ── Optional bge-large embeddings ────────────────────────────────────────────
-_fastembed_model = None
+from mempalace.db import PalaceDB, get_db, embed
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://mempalace:mempalace@localhost:5433/mempalace")
 
 
-def _get_embedder(model_name: str):
-    """Lazy-load a fastembed model. Cached globally after first load."""
-    global _fastembed_model
-    if _fastembed_model is None:
-        try:
-            from fastembed import TextEmbedding
+# ── In-memory vector collection (replaces ChromaDB) ─────────────────────────
+class _BenchCollection:
+    """Lightweight in-memory vector store using mempalace.db embed()."""
 
-            print(f"  Loading embedding model: {model_name} (first run may download ~1.3GB)")
-            _fastembed_model = TextEmbedding(model_name=model_name)
-            print("  Embedding model loaded.")
-        except ImportError:
-            print("  fastembed not installed — pip3 install fastembed")
-            sys.exit(1)
-    return _fastembed_model
+    def __init__(self):
+        self._docs = []
+        self._ids = []
+        self._metas = []
+        self._embeddings = []
 
+    def add(self, documents, ids, metadatas=None, embeddings=None):
+        self._docs.extend(documents)
+        self._ids.extend(ids)
+        if metadatas:
+            self._metas.extend(metadatas)
+        else:
+            self._metas.extend([{} for _ in documents])
+        if embeddings is not None:
+            self._embeddings.extend([np.array(e, dtype=np.float32) for e in embeddings])
+        else:
+            self._embeddings.extend(embed(documents))
 
-def _embed(texts: list, embed_model: str) -> list:
-    """Embed a list of texts. Returns list of float lists, or None for default."""
-    if not embed_model or embed_model == "default":
-        return None
-    embedder = _get_embedder(embed_model)
-    return [vec.tolist() for vec in embedder.embed(texts)]
+    def query(self, query_texts=None, query_embeddings=None, n_results=5, include=None, where=None):
+        if not self._embeddings:
+            return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+        if query_embeddings is not None:
+            q_emb = np.array(query_embeddings[0], dtype=np.float32)
+        else:
+            q_emb = embed(query_texts[:1])[0]
+        indices = list(range(len(self._docs)))
+        if where:
+            filtered = []
+            for i in indices:
+                match = True
+                for k, v in where.items():
+                    if k.startswith("$"):
+                        continue
+                    meta_val = self._metas[i].get(k)
+                    if isinstance(v, dict) and "$in" in v:
+                        if meta_val not in v["$in"]:
+                            match = False
+                    elif meta_val != v:
+                        match = False
+                if match:
+                    filtered.append(i)
+            indices = filtered
+        emb_matrix = np.array([self._embeddings[i] for i in indices], dtype=np.float32)
+        if len(emb_matrix) == 0:
+            return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+        norms_m = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+        norm_q = np.linalg.norm(q_emb)
+        norms_m[norms_m == 0] = 1
+        if norm_q == 0:
+            norm_q = 1
+        cosine_sim = emb_matrix @ q_emb / (norms_m.squeeze() * norm_q)
+        distances = 1.0 - cosine_sim
+        top_k = min(n_results, len(indices))
+        top_idx = np.argsort(distances)[:top_k]
+        out_ids = [self._ids[indices[i]] for i in top_idx]
+        out_docs = [self._docs[indices[i]] for i in top_idx]
+        out_metas = [self._metas[indices[i]] for i in top_idx]
+        out_dists = [float(distances[i]) for i in top_idx]
+        return {"ids": [out_ids], "documents": [out_docs], "metadatas": [out_metas], "distances": [out_dists]}
+
+    def count(self):
+        return len(self._docs)
 
 
 def _query(collection, question: str, n_results: int, embed_model: str, include=None, where=None):
-    """Query collection with either query_texts or query_embeddings."""
+    """Query collection — embed_model param kept for API compat but ignored (uses mempalace.db embed)."""
     if include is None:
         include = ["distances", "metadatas", "documents"]
-    q_emb = _embed([question], embed_model)
-    kwargs = dict(n_results=n_results, include=include)
+    kwargs = dict(query_texts=[question], n_results=n_results, include=include)
     if where:
         kwargs["where"] = where
-    if q_emb is not None:
-        kwargs["query_embeddings"] = q_emb
-    else:
-        kwargs["query_texts"] = [question]
     return collection.query(**kwargs)
 
 
@@ -706,110 +744,171 @@ def run_benchmark(
                 f"{len(sessions)} sessions, {len(corpus)} docs, {len(qa_pairs)} questions"
             )
 
-        tmpdir = tempfile.mkdtemp(prefix="mempal_locomo_")
-        palace_path = os.path.join(tmpdir, "palace")
+        collection = _BenchCollection()
 
-        try:
-            client = chromadb.PersistentClient(path=palace_path)
-            collection = client.create_collection("mempal_drawers")
+        if mode == "aaak":
+            from mempalace.dialect import Dialect
 
-            if mode == "aaak":
-                from mempalace.dialect import Dialect
+            dialect = Dialect()
+            docs_to_ingest = [dialect.compress(doc) for doc in corpus]
+        else:
+            docs_to_ingest = corpus
 
-                dialect = Dialect()
-                docs_to_ingest = [dialect.compress(doc) for doc in corpus]
+        add_kwargs = dict(
+            documents=docs_to_ingest,
+            ids=[f"doc_{i}" for i in range(len(corpus))],
+            metadatas=[
+                {
+                    "corpus_id": cid,
+                    "timestamp": ts,
+                    "room": room_assignments.get(cid, "general"),
+                }
+                for cid, ts in zip(corpus_ids, corpus_timestamps)
+            ],
+        )
+        collection.add(**add_kwargs)
+
+        for qa in qa_pairs:
+            question = qa["question"]
+            answer = qa.get("answer", qa.get("adversarial_answer", ""))
+            category = qa["category"]
+            evidence = qa.get("evidence", [])
+
+            # Extract names + predicate keywords once (used by hybrid, rooms, palace)
+            names = _person_names(question) if mode in ("hybrid", "rooms", "palace") else []
+            name_words = {n.lower() for n in names}
+            all_kws = _kw(question) if mode in ("hybrid", "rooms", "palace") else []
+            predicate_kws = [w for w in all_kws if w not in name_words]
+            quoted = _quoted_phrases(question) if mode in ("hybrid", "rooms", "palace") else []
+
+            if mode == "palace":
+                # ── True palace navigation ────────────────────────────────
+                # Route using conversation-specific room summaries.
+                # This ensures the same vocabulary used at INDEX TIME (session
+                # summaries) is also used at QUERY TIME — no global taxonomy mismatch.
+                #
+                # Build: room → aggregated summary text for this conversation
+                room_summaries: dict[str, list[str]] = {}
+                for sess in sessions:
+                    sess_id = f"session_{sess['session_num']}"
+                    room = room_assignments.get(sess_id, "general")
+                    summary = sess.get("summary", "")
+                    if room not in room_summaries:
+                        room_summaries[room] = []
+                    if summary:
+                        room_summaries[room].append(summary)
+
+                # Score each room by predicate keyword overlap against its aggregate
+                room_kw_scores = []
+                for room, summaries in room_summaries.items():
+                    agg_text = " ".join(summaries)
+                    overlap = _kw_overlap(predicate_kws, agg_text) if predicate_kws else 0.0
+                    room_kw_scores.append((overlap, room))
+                room_kw_scores.sort(reverse=True)
+
+                # Take top-3 rooms; if top score is 0, open up to all (no signal)
+                n_rooms_to_search = 3
+                if room_kw_scores and room_kw_scores[0][0] == 0.0:
+                    n_rooms_to_search = len(room_kw_scores)
+                target_rooms = [r for _, r in room_kw_scores[:n_rooms_to_search]]
+
+                # Filter to sessions in those rooms
+                if len(target_rooms) < len(room_summaries):
+                    where_filter = {"room": {"$in": target_rooms}}
+                else:
+                    where_filter = None  # all rooms — skip filter
+
+                # How many sessions are in those rooms?
+                sessions_in_rooms = (
+                    sum(
+                        1
+                        for cid in corpus_ids
+                        if room_assignments.get(cid, "general") in target_rooms
+                    )
+                    if where_filter
+                    else len(corpus)
+                )
+                n_retrieve = max(top_k, min(sessions_in_rooms, len(corpus)))
+
+                results_p = _query(
+                    collection, question, n_retrieve, embed_model, where=where_filter
+                )
+                raw_ids = [m["corpus_id"] for m in results_p["metadatas"][0]]
+                raw_distances = results_p["distances"][0]
+                raw_docs = results_p["documents"][0]
+
+                # Hybrid_v5 rerank within the room (small set — clean signal)
+                scored = []
+                for cid, dist, doc in zip(raw_ids, raw_distances, raw_docs):
+                    pred_overlap = _kw_overlap(predicate_kws, doc)
+                    fused = dist * (1.0 - 0.50 * pred_overlap)
+                    q_boost = _quoted_boost(quoted, doc)
+                    if q_boost > 0:
+                        fused *= 1.0 - 0.60 * q_boost
+                    n_boost = _name_boost(names, doc)
+                    if n_boost > 0:
+                        fused *= 1.0 - 0.20 * n_boost
+                    scored.append((cid, dist, doc, fused))
+                scored.sort(key=lambda x: x[3])
+                retrieved_ids = [x[0] for x in scored[:top_k]]
+                retrieved_docs = [x[2] for x in scored[:top_k]]
+
+            elif mode == "rooms":
+                # ── Two-stage palace navigation ──────────────────────────────
+                # Stage 1: route via session summaries to find relevant rooms.
+                #   Score each session's summary by predicate keyword overlap.
+                #   Keep top third of sessions (or at least top_k sessions).
+                n_rooms = max(top_k, len(sessions) // 3)
+                room_scores = []
+                for sess in sessions:
+                    summary = sess.get("summary", "")
+                    overlap = (
+                        _kw_overlap(predicate_kws, summary)
+                        if (summary and predicate_kws)
+                        else 0.0
+                    )
+                    room_scores.append((overlap, f"session_{sess['session_num']}"))
+                room_scores.sort(reverse=True)
+                top_room_ids = [sid for _, sid in room_scores[:n_rooms]]
+
+                # Stage 2: embedding query filtered to those rooms, then hybrid rerank
+                n_in_rooms = min(top_k * 2, len(top_room_ids))
+                where_filter = (
+                    {"corpus_id": {"$in": top_room_ids}} if len(top_room_ids) > 1 else None
+                )
+                results_r = _query(
+                    collection, question, n_in_rooms, embed_model, where=where_filter
+                )
+                raw_ids = [m["corpus_id"] for m in results_r["metadatas"][0]]
+                raw_distances = results_r["distances"][0]
+                raw_docs = results_r["documents"][0]
+
+                scored = []
+                for cid, dist, doc in zip(raw_ids, raw_distances, raw_docs):
+                    pred_overlap = _kw_overlap(predicate_kws, doc)
+                    fused = dist * (1.0 - 0.50 * pred_overlap)
+                    q_boost = _quoted_boost(quoted, doc)
+                    if q_boost > 0:
+                        fused *= 1.0 - 0.60 * q_boost
+                    n_boost = _name_boost(names, doc)
+                    if n_boost > 0:
+                        fused *= 1.0 - 0.20 * n_boost
+                    scored.append((cid, dist, doc, fused))
+                scored.sort(key=lambda x: x[3])
+                retrieved_ids = [x[0] for x in scored[:top_k]]
+                retrieved_docs = [x[2] for x in scored[:top_k]]
+
             else:
-                docs_to_ingest = corpus
+                # ── Standard query + optional hybrid rerank ──────────────────
+                n_retrieve = min(top_k * 3 if mode == "hybrid" else top_k, len(corpus))
+                results = _query(collection, question, n_retrieve, embed_model)
+                raw_ids = [m["corpus_id"] for m in results["metadatas"][0]]
+                raw_distances = results["distances"][0]
+                raw_docs = results["documents"][0]
 
-            corpus_embeddings = _embed(docs_to_ingest, embed_model)
-            add_kwargs = dict(
-                documents=docs_to_ingest,
-                ids=[f"doc_{i}" for i in range(len(corpus))],
-                metadatas=[
-                    {
-                        "corpus_id": cid,
-                        "timestamp": ts,
-                        "room": room_assignments.get(cid, "general"),
-                    }
-                    for cid, ts in zip(corpus_ids, corpus_timestamps)
-                ],
-            )
-            if corpus_embeddings is not None:
-                add_kwargs["embeddings"] = corpus_embeddings
-            collection.add(**add_kwargs)
-
-            for qa in qa_pairs:
-                question = qa["question"]
-                answer = qa.get("answer", qa.get("adversarial_answer", ""))
-                category = qa["category"]
-                evidence = qa.get("evidence", [])
-
-                # Extract names + predicate keywords once (used by hybrid, rooms, palace)
-                names = _person_names(question) if mode in ("hybrid", "rooms", "palace") else []
-                name_words = {n.lower() for n in names}
-                all_kws = _kw(question) if mode in ("hybrid", "rooms", "palace") else []
-                predicate_kws = [w for w in all_kws if w not in name_words]
-                quoted = _quoted_phrases(question) if mode in ("hybrid", "rooms", "palace") else []
-
-                if mode == "palace":
-                    # ── True palace navigation ────────────────────────────────
-                    # Route using conversation-specific room summaries.
-                    # This ensures the same vocabulary used at INDEX TIME (session
-                    # summaries) is also used at QUERY TIME — no global taxonomy mismatch.
-                    #
-                    # Build: room → aggregated summary text for this conversation
-                    room_summaries: dict[str, list[str]] = {}
-                    for sess in sessions:
-                        sess_id = f"session_{sess['session_num']}"
-                        room = room_assignments.get(sess_id, "general")
-                        summary = sess.get("summary", "")
-                        if room not in room_summaries:
-                            room_summaries[room] = []
-                        if summary:
-                            room_summaries[room].append(summary)
-
-                    # Score each room by predicate keyword overlap against its aggregate
-                    room_kw_scores = []
-                    for room, summaries in room_summaries.items():
-                        agg_text = " ".join(summaries)
-                        overlap = _kw_overlap(predicate_kws, agg_text) if predicate_kws else 0.0
-                        room_kw_scores.append((overlap, room))
-                    room_kw_scores.sort(reverse=True)
-
-                    # Take top-3 rooms; if top score is 0, open up to all (no signal)
-                    n_rooms_to_search = 3
-                    if room_kw_scores and room_kw_scores[0][0] == 0.0:
-                        n_rooms_to_search = len(room_kw_scores)
-                    target_rooms = [r for _, r in room_kw_scores[:n_rooms_to_search]]
-
-                    # Filter to sessions in those rooms
-                    if len(target_rooms) < len(room_summaries):
-                        where_filter = {"room": {"$in": target_rooms}}
-                    else:
-                        where_filter = None  # all rooms — skip filter
-
-                    # How many sessions are in those rooms?
-                    sessions_in_rooms = (
-                        sum(
-                            1
-                            for cid in corpus_ids
-                            if room_assignments.get(cid, "general") in target_rooms
-                        )
-                        if where_filter
-                        else len(corpus)
-                    )
-                    n_retrieve = max(top_k, min(sessions_in_rooms, len(corpus)))
-
-                    results_p = _query(
-                        collection, question, n_retrieve, embed_model, where=where_filter
-                    )
-                    raw_ids = [m["corpus_id"] for m in results_p["metadatas"][0]]
-                    raw_distances = results_p["distances"][0]
-                    raw_docs = results_p["documents"][0]
-
-                    # Hybrid_v5 rerank within the room (small set — clean signal)
+                if mode == "hybrid":
                     scored = []
-                    for cid, dist, doc in zip(raw_ids, raw_distances, raw_docs):
+                    for i, (cid, dist, doc) in enumerate(zip(raw_ids, raw_distances, raw_docs)):
                         pred_overlap = _kw_overlap(predicate_kws, doc)
                         fused = dist * (1.0 - 0.50 * pred_overlap)
                         q_boost = _quoted_boost(quoted, doc)
@@ -818,120 +917,48 @@ def run_benchmark(
                         n_boost = _name_boost(names, doc)
                         if n_boost > 0:
                             fused *= 1.0 - 0.20 * n_boost
-                        scored.append((cid, dist, doc, fused))
-                    scored.sort(key=lambda x: x[3])
-                    retrieved_ids = [x[0] for x in scored[:top_k]]
-                    retrieved_docs = [x[2] for x in scored[:top_k]]
-
-                elif mode == "rooms":
-                    # ── Two-stage palace navigation ──────────────────────────────
-                    # Stage 1: route via session summaries to find relevant rooms.
-                    #   Score each session's summary by predicate keyword overlap.
-                    #   Keep top third of sessions (or at least top_k sessions).
-                    n_rooms = max(top_k, len(sessions) // 3)
-                    room_scores = []
-                    for sess in sessions:
-                        summary = sess.get("summary", "")
-                        overlap = (
-                            _kw_overlap(predicate_kws, summary)
-                            if (summary and predicate_kws)
-                            else 0.0
-                        )
-                        room_scores.append((overlap, f"session_{sess['session_num']}"))
-                    room_scores.sort(reverse=True)
-                    top_room_ids = [sid for _, sid in room_scores[:n_rooms]]
-
-                    # Stage 2: embedding query filtered to those rooms, then hybrid rerank
-                    n_in_rooms = min(top_k * 2, len(top_room_ids))
-                    where_filter = (
-                        {"corpus_id": {"$in": top_room_ids}} if len(top_room_ids) > 1 else None
-                    )
-                    results_r = _query(
-                        collection, question, n_in_rooms, embed_model, where=where_filter
-                    )
-                    raw_ids = [m["corpus_id"] for m in results_r["metadatas"][0]]
-                    raw_distances = results_r["distances"][0]
-                    raw_docs = results_r["documents"][0]
-
-                    scored = []
-                    for cid, dist, doc in zip(raw_ids, raw_distances, raw_docs):
-                        pred_overlap = _kw_overlap(predicate_kws, doc)
-                        fused = dist * (1.0 - 0.50 * pred_overlap)
-                        q_boost = _quoted_boost(quoted, doc)
-                        if q_boost > 0:
-                            fused *= 1.0 - 0.60 * q_boost
-                        n_boost = _name_boost(names, doc)
-                        if n_boost > 0:
-                            fused *= 1.0 - 0.20 * n_boost
-                        scored.append((cid, dist, doc, fused))
-                    scored.sort(key=lambda x: x[3])
-                    retrieved_ids = [x[0] for x in scored[:top_k]]
-                    retrieved_docs = [x[2] for x in scored[:top_k]]
-
+                        scored.append((i, cid, dist, doc, fused))
+                    scored.sort(key=lambda x: x[4])
+                    retrieved_ids = [x[1] for x in scored][:top_k]
+                    retrieved_docs = [x[3] for x in scored][:top_k]
                 else:
-                    # ── Standard query + optional hybrid rerank ──────────────────
-                    n_retrieve = min(top_k * 3 if mode == "hybrid" else top_k, len(corpus))
-                    results = _query(collection, question, n_retrieve, embed_model)
-                    raw_ids = [m["corpus_id"] for m in results["metadatas"][0]]
-                    raw_distances = results["distances"][0]
-                    raw_docs = results["documents"][0]
+                    retrieved_ids = raw_ids[:top_k]
+                    retrieved_docs = raw_docs[:top_k]
 
-                    if mode == "hybrid":
-                        scored = []
-                        for i, (cid, dist, doc) in enumerate(zip(raw_ids, raw_distances, raw_docs)):
-                            pred_overlap = _kw_overlap(predicate_kws, doc)
-                            fused = dist * (1.0 - 0.50 * pred_overlap)
-                            q_boost = _quoted_boost(quoted, doc)
-                            if q_boost > 0:
-                                fused *= 1.0 - 0.60 * q_boost
-                            n_boost = _name_boost(names, doc)
-                            if n_boost > 0:
-                                fused *= 1.0 - 0.20 * n_boost
-                            scored.append((i, cid, dist, doc, fused))
-                        scored.sort(key=lambda x: x[4])
-                        retrieved_ids = [x[1] for x in scored][:top_k]
-                        retrieved_docs = [x[3] for x in scored][:top_k]
-                    else:
-                        retrieved_ids = raw_ids[:top_k]
-                        retrieved_docs = raw_docs[:top_k]
-
-                # LLM rerank
-                if llm_rerank_enabled and api_key:
-                    rerank_pool = min(10, len(retrieved_ids))
-                    retrieved_ids = llm_rerank_locomo(
-                        question,
-                        retrieved_ids,
-                        retrieved_docs,
-                        api_key,
-                        top_k=rerank_pool,
-                        model=llm_model,
-                    )
-
-                # Compute recall
-                if granularity == "dialog":
-                    evidence_set = evidence_to_dialog_ids(evidence)
-                else:
-                    evidence_set = evidence_to_session_ids(evidence)
-
-                recall = compute_retrieval_recall(retrieved_ids, evidence_set)
-                all_recall.append(recall)
-                per_category[category].append(recall)
-                total_qa += 1
-
-                results_log.append(
-                    {
-                        "sample_id": sample_id,
-                        "question": question,
-                        "answer": answer,
-                        "category": category,
-                        "evidence": evidence,
-                        "retrieved_ids": retrieved_ids,
-                        "recall": recall,
-                    }
+            # LLM rerank
+            if llm_rerank_enabled and api_key:
+                rerank_pool = min(10, len(retrieved_ids))
+                retrieved_ids = llm_rerank_locomo(
+                    question,
+                    retrieved_ids,
+                    retrieved_docs,
+                    api_key,
+                    top_k=rerank_pool,
+                    model=llm_model,
                 )
 
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+            # Compute recall
+            if granularity == "dialog":
+                evidence_set = evidence_to_dialog_ids(evidence)
+            else:
+                evidence_set = evidence_to_session_ids(evidence)
+
+            recall = compute_retrieval_recall(retrieved_ids, evidence_set)
+            all_recall.append(recall)
+            per_category[category].append(recall)
+            total_qa += 1
+
+            results_log.append(
+                {
+                    "sample_id": sample_id,
+                    "question": question,
+                    "answer": answer,
+                    "category": category,
+                    "evidence": evidence,
+                    "retrieved_ids": retrieved_ids,
+                    "recall": recall,
+                }
+            )
 
     elapsed = (datetime.now() - start_time).total_seconds()
 
@@ -1039,8 +1066,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--embed-model",
         default="default",
-        help="Embedding model: 'default' (ChromaDB built-in) or "
-        "'BAAI/bge-large-en-v1.5' (requires fastembed)",
+        help="Embedding model (default: uses mempalace.db embed() with all-MiniLM-L6-v2). "
+        "Note: custom embed models are no longer supported after pgvector migration.",
     )
     args = parser.parse_args()
 

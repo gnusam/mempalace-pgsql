@@ -7,65 +7,43 @@ Builds a navigable graph from the palace structure:
   - Edges = shared rooms across wings (tunnels)
   - Edge types = halls (the corridors)
 
-Enables queries like:
-  "Start at chromadb-setup in wing_code, walk to wing_myproject"
-  "Find all rooms connected to riley-college-apps"
-  "What topics bridge wing_hardware and wing_myproject?"
-
-No external graph DB needed — built from ChromaDB metadata.
+No external graph DB needed — built from PostgreSQL metadata.
 """
 
 from collections import defaultdict, Counter
-from .config import MempalaceConfig
-
-import chromadb
+from .db import get_db
 
 
-def _get_collection(config=None):
-    config = config or MempalaceConfig()
-    try:
-        client = chromadb.PersistentClient(path=config.palace_path)
-        return client.get_collection(config.collection_name)
-    except Exception:
-        return None
-
-
-def build_graph(col=None, config=None):
+def build_graph():
     """
-    Build the palace graph from ChromaDB metadata.
+    Build the palace graph from drawer metadata.
 
     Returns:
         nodes: dict of {room: {wings: set, halls: set, count: int}}
         edges: list of {room, wing_a, wing_b, hall} — one per tunnel crossing
     """
-    if col is None:
-        col = _get_collection(config)
-    if not col:
-        return {}, []
-
-    total = col.count()
+    db = get_db()
     room_data = defaultdict(lambda: {"wings": set(), "halls": set(), "count": 0, "dates": set()})
 
     offset = 0
-    while offset < total:
-        batch = col.get(limit=1000, offset=offset, include=["metadatas"])
+    while True:
+        batch = db.get_drawers(limit=1000, offset=offset)
+        if not batch["ids"]:
+            break
         for meta in batch["metadatas"]:
             room = meta.get("room", "")
             wing = meta.get("wing", "")
             hall = meta.get("hall", "")
-            date = meta.get("date", "")
+            date_val = meta.get("date", "")
             if room and room != "general" and wing:
                 room_data[room]["wings"].add(wing)
                 if hall:
                     room_data[room]["halls"].add(hall)
-                if date:
-                    room_data[room]["dates"].add(date)
+                if date_val:
+                    room_data[room]["dates"].add(date_val)
                 room_data[room]["count"] += 1
-        if not batch["ids"]:
-            break
         offset += len(batch["ids"])
 
-    # Build edges from rooms that span multiple wings
     edges = []
     for room, data in room_data.items():
         wings = sorted(data["wings"])
@@ -83,7 +61,6 @@ def build_graph(col=None, config=None):
                             }
                         )
 
-    # Convert sets to lists for JSON serialization
     nodes = {}
     for room, data in room_data.items():
         nodes[room] = {
@@ -96,14 +73,8 @@ def build_graph(col=None, config=None):
     return nodes, edges
 
 
-def traverse(start_room: str, col=None, config=None, max_hops: int = 2):
-    """
-    Walk the graph from a starting room. Find connected rooms
-    through shared wings.
-
-    Returns list of paths: [{room, wing, hall, hop_distance}]
-    """
-    nodes, edges = build_graph(col, config)
+def traverse(start_room: str, max_hops: int = 2):
+    nodes, edges = build_graph()
 
     if start_room not in nodes:
         return {
@@ -123,7 +94,6 @@ def traverse(start_room: str, col=None, config=None, max_hops: int = 2):
         }
     ]
 
-    # BFS traversal
     frontier = [(start_room, 0)]
     while frontier:
         current_room, depth = frontier.pop(0)
@@ -133,7 +103,6 @@ def traverse(start_room: str, col=None, config=None, max_hops: int = 2):
         current = nodes.get(current_room, {})
         current_wings = set(current.get("wings", []))
 
-        # Find all rooms that share a wing with current room
         for room, data in nodes.items():
             if room in visited:
                 continue
@@ -153,29 +122,22 @@ def traverse(start_room: str, col=None, config=None, max_hops: int = 2):
                 if depth + 1 < max_hops:
                     frontier.append((room, depth + 1))
 
-    # Sort by relevance (hop distance, then count)
     results.sort(key=lambda x: (x["hop"], -x["count"]))
-    return results[:50]  # cap results
+    return results[:50]
 
 
-def find_tunnels(wing_a: str = None, wing_b: str = None, col=None, config=None):
-    """
-    Find rooms that connect two wings (or all tunnel rooms if no wings specified).
-    These are the "hallways" — same named idea appearing in multiple domains.
-    """
-    nodes, edges = build_graph(col, config)
+def find_tunnels(wing_a: str = None, wing_b: str = None):
+    nodes, edges = build_graph()
 
     tunnels = []
     for room, data in nodes.items():
         wings = data["wings"]
         if len(wings) < 2:
             continue
-
         if wing_a and wing_a not in wings:
             continue
         if wing_b and wing_b not in wings:
             continue
-
         tunnels.append(
             {
                 "room": room,
@@ -190,9 +152,8 @@ def find_tunnels(wing_a: str = None, wing_b: str = None, col=None, config=None):
     return tunnels[:50]
 
 
-def graph_stats(col=None, config=None):
-    """Summary statistics about the palace graph."""
-    nodes, edges = build_graph(col, config)
+def graph_stats():
+    nodes, edges = build_graph()
 
     tunnel_rooms = sum(1 for n in nodes.values() if len(n["wings"]) >= 2)
     wing_counts = Counter()
@@ -214,11 +175,9 @@ def graph_stats(col=None, config=None):
 
 
 def _fuzzy_match(query: str, nodes: dict, n: int = 5):
-    """Find rooms that approximately match a query string."""
     query_lower = query.lower()
     scored = []
     for room in nodes:
-        # Simple substring matching
         if query_lower in room:
             scored.append((room, 1.0))
         elif any(word in room for word in query_lower.split("-")):

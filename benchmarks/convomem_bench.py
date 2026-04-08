@@ -24,21 +24,91 @@ Usage:
 import os
 import sys
 import json
-import shutil
 import ssl
-import tempfile
 import argparse
 import urllib.request
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
 
-import chromadb
+import numpy as np
 
 # Bypass SSL for restricted environments
 ssl._create_default_https_context = ssl._create_unverified_context
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from mempalace.db import PalaceDB, get_db, embed
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://mempalace:mempalace@localhost:5433/mempalace")
+
+
+# ── In-memory vector collection (replaces ChromaDB) ─────────────────────────
+class _BenchCollection:
+    """Lightweight in-memory vector store using mempalace.db embed()."""
+
+    def __init__(self):
+        self._docs = []
+        self._ids = []
+        self._metas = []
+        self._embeddings = []
+
+    def add(self, documents, ids, metadatas=None, embeddings=None):
+        self._docs.extend(documents)
+        self._ids.extend(ids)
+        if metadatas:
+            self._metas.extend(metadatas)
+        else:
+            self._metas.extend([{} for _ in documents])
+        if embeddings is not None:
+            self._embeddings.extend([np.array(e, dtype=np.float32) for e in embeddings])
+        else:
+            self._embeddings.extend(embed(documents))
+
+    def query(self, query_texts=None, query_embeddings=None, n_results=5, include=None, where=None):
+        if not self._embeddings:
+            return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+        if query_embeddings is not None:
+            q_emb = np.array(query_embeddings[0], dtype=np.float32)
+        else:
+            q_emb = embed(query_texts[:1])[0]
+        indices = list(range(len(self._docs)))
+        if where:
+            filtered = []
+            for i in indices:
+                match = True
+                for k, v in where.items():
+                    if k.startswith("$"):
+                        continue
+                    meta_val = self._metas[i].get(k)
+                    if isinstance(v, dict) and "$in" in v:
+                        if meta_val not in v["$in"]:
+                            match = False
+                    elif meta_val != v:
+                        match = False
+                if match:
+                    filtered.append(i)
+            indices = filtered
+        emb_matrix = np.array([self._embeddings[i] for i in indices], dtype=np.float32)
+        if len(emb_matrix) == 0:
+            return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+        norms_m = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+        norm_q = np.linalg.norm(q_emb)
+        norms_m[norms_m == 0] = 1
+        if norm_q == 0:
+            norm_q = 1
+        cosine_sim = emb_matrix @ q_emb / (norms_m.squeeze() * norm_q)
+        distances = 1.0 - cosine_sim
+        top_k = min(n_results, len(indices))
+        top_idx = np.argsort(distances)[:top_k]
+        out_ids = [self._ids[indices[i]] for i in top_idx]
+        out_docs = [self._docs[indices[i]] for i in top_idx]
+        out_metas = [self._metas[indices[i]] for i in top_idx]
+        out_dists = [float(distances[i]) for i in top_idx]
+        return {"ids": [out_ids], "documents": [out_docs], "metadatas": [out_metas], "distances": [out_dists]}
+
+    def count(self):
+        return len(self._docs)
 
 HF_BASE = "https://huggingface.co/datasets/Salesforce/ConvoMem/resolve/main/core_benchmark/evidence_questions"
 
@@ -174,55 +244,47 @@ def retrieve_for_item(item, top_k=10, mode="raw"):
     if not corpus:
         return 0.0, {"error": "empty corpus"}
 
-    tmpdir = tempfile.mkdtemp(prefix="mempal_convomem_")
-    palace_path = os.path.join(tmpdir, "palace")
+    collection = _BenchCollection()
 
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        collection = client.create_collection("mempal_drawers")
+    # Optionally compress
+    if mode == "aaak":
+        from mempalace.dialect import Dialect
 
-        # Optionally compress
-        if mode == "aaak":
-            from mempalace.dialect import Dialect
+        dialect = Dialect()
+        docs = [dialect.compress(doc) for doc in corpus]
+    else:
+        docs = corpus
 
-            dialect = Dialect()
-            docs = [dialect.compress(doc) for doc in corpus]
-        else:
-            docs = corpus
+    collection.add(
+        documents=docs,
+        ids=[f"msg_{i}" for i in range(len(corpus))],
+        metadatas=[{"speaker": s, "idx": i} for i, s in enumerate(corpus_speakers)],
+    )
 
-        collection.add(
-            documents=docs,
-            ids=[f"msg_{i}" for i in range(len(corpus))],
-            metadatas=[{"speaker": s, "idx": i} for i, s in enumerate(corpus_speakers)],
-        )
+    results = collection.query(
+        query_texts=[question],
+        n_results=min(top_k, len(corpus)),
+        include=["documents", "metadatas"],
+    )
 
-        results = collection.query(
-            query_texts=[question],
-            n_results=min(top_k, len(corpus)),
-            include=["documents", "metadatas"],
-        )
+    # Check if any retrieved message matches evidence
+    retrieved_indices = [m["idx"] for m in results["metadatas"][0]]
+    retrieved_texts = [corpus[i].strip().lower() for i in retrieved_indices]
 
-        # Check if any retrieved message matches evidence
-        retrieved_indices = [m["idx"] for m in results["metadatas"][0]]
-        retrieved_texts = [corpus[i].strip().lower() for i in retrieved_indices]
+    found = 0
+    for ev_text in evidence_texts:
+        for ret_text in retrieved_texts:
+            if ev_text in ret_text or ret_text in ev_text:
+                found += 1
+                break
 
-        found = 0
-        for ev_text in evidence_texts:
-            for ret_text in retrieved_texts:
-                if ev_text in ret_text or ret_text in ev_text:
-                    found += 1
-                    break
+    recall = found / len(evidence_texts) if evidence_texts else 1.0
 
-        recall = found / len(evidence_texts) if evidence_texts else 1.0
-
-        return recall, {
-            "retrieved_count": len(retrieved_indices),
-            "evidence_count": len(evidence_texts),
-            "found": found,
-        }
-
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    return recall, {
+        "retrieved_count": len(retrieved_indices),
+        "evidence_count": len(evidence_texts),
+        "found": found,
+    }
 
 
 # =============================================================================

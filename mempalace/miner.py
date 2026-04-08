@@ -9,13 +9,11 @@ Stores verbatim chunks as drawers. No summaries. Ever.
 
 import os
 import sys
-import hashlib
 import fnmatch
 from pathlib import Path
-from datetime import datetime
 from collections import defaultdict
 
-import chromadb
+from .db import get_db
 
 READABLE_EXTENSIONS = {
     ".txt",
@@ -63,7 +61,10 @@ SKIP_DIRS = {
     ".ipynb_checkpoints",
     ".eggs",
     "htmlcov",
-    "target",
+    "target",       # Rust/Cargo build output
+    "vendor",       # PHP/Go vendored deps
+    ".gradle",
+    "storage",      # Laravel storage (logs, cache)
 }
 
 SKIP_FILENAMES = {
@@ -389,53 +390,26 @@ def chunk_text(content: str, source_file: str) -> list:
 
 
 # =============================================================================
-# PALACE — ChromaDB operations
+# PALACE — PostgreSQL operations
 # =============================================================================
 
 
-def get_collection(palace_path: str):
-    os.makedirs(palace_path, exist_ok=True)
-    client = chromadb.PersistentClient(path=palace_path)
-    try:
-        return client.get_collection("mempalace_drawers")
-    except Exception:
-        return client.create_collection("mempalace_drawers")
+def get_db_instance(palace_path: str = None):
+    """Return the PalaceDB instance."""
+    return get_db()
 
 
-def file_already_mined(collection, source_file: str) -> bool:
+def file_already_mined(db, source_file: str) -> bool:
     """Fast check: has this file been filed before?"""
-    try:
-        results = collection.get(where={"source_file": source_file}, limit=1)
-        return len(results.get("ids", [])) > 0
-    except Exception:
-        return False
+    return db.file_already_mined(source_file)
 
 
 def add_drawer(
-    collection, wing: str, room: str, content: str, source_file: str, chunk_index: int, agent: str
+    db, wing: str, room: str, content: str, source_file: str, chunk_index: int, agent: str
 ):
     """Add one drawer to the palace."""
-    drawer_id = f"drawer_{wing}_{room}_{hashlib.md5((source_file + str(chunk_index)).encode(), usedforsecurity=False).hexdigest()[:16]}"
-    try:
-        collection.add(
-            documents=[content],
-            ids=[drawer_id],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "source_file": source_file,
-                    "chunk_index": chunk_index,
-                    "added_by": agent,
-                    "filed_at": datetime.now().isoformat(),
-                }
-            ],
-        )
-        return True
-    except Exception as e:
-        if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
-            return False
-        raise
+    result = db.add_drawer(wing, room, content, source_file, chunk_index, agent)
+    return result is not None
 
 
 # =============================================================================
@@ -446,7 +420,7 @@ def add_drawer(
 def process_file(
     filepath: Path,
     project_path: Path,
-    collection,
+    db,
     wing: str,
     rooms: list,
     agent: str,
@@ -456,7 +430,7 @@ def process_file(
 
     # Skip if already filed
     source_file = str(filepath)
-    if not dry_run and file_already_mined(collection, source_file):
+    if not dry_run and file_already_mined(db, source_file):
         return 0
 
     try:
@@ -478,7 +452,7 @@ def process_file(
     drawers_added = 0
     for chunk in chunks:
         added = add_drawer(
-            collection=collection,
+            db=db,
             wing=wing,
             room=room,
             content=chunk["content"],
@@ -559,7 +533,7 @@ def scan_project(
 
 def mine(
     project_dir: str,
-    palace_path: str,
+    palace_path: str = None,
     wing_override: str = None,
     agent: str = "mempalace",
     limit: int = 0,
@@ -589,7 +563,7 @@ def mine(
     print(f"  Wing:    {wing}")
     print(f"  Rooms:   {', '.join(r['name'] for r in rooms)}")
     print(f"  Files:   {len(files)}")
-    print(f"  Palace:  {palace_path}")
+    print(f"  Palace:  PostgreSQL ({os.environ.get('DATABASE_URL', 'default')})")
     if dry_run:
         print("  DRY RUN — nothing will be filed")
     if not respect_gitignore:
@@ -599,9 +573,9 @@ def mine(
     print(f"{'─' * 55}\n")
 
     if not dry_run:
-        collection = get_collection(palace_path)
+        db = get_db_instance(palace_path)
     else:
-        collection = None
+        db = None
 
     total_drawers = 0
     files_skipped = 0
@@ -611,7 +585,7 @@ def mine(
         drawers = process_file(
             filepath=filepath,
             project_path=project_path,
-            collection=collection,
+            db=db,
             wing=wing,
             rooms=rooms,
             agent=agent,
@@ -643,18 +617,16 @@ def mine(
 # =============================================================================
 
 
-def status(palace_path: str):
+def status(palace_path: str = None):
     """Show what's been filed in the palace."""
+    db = get_db()
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        r = db.get_drawers(limit=10000)
     except Exception:
-        print(f"\n  No palace found at {palace_path}")
+        print("\n  No palace found")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
         return
 
-    # Count by wing and room
-    r = col.get(limit=10000, include=["metadatas"])
     metas = r["metadatas"]
 
     wing_rooms = defaultdict(lambda: defaultdict(int))
