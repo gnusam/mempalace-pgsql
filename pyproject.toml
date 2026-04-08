@@ -40,11 +40,11 @@ Repository = "https://github.com/milla-jovovich/mempalace"
 mempalace = "mempalace:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "ruff>=0.4.0"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0"]
 spellcheck = ["autocorrect>=2.0"]
 
 [dependency-groups]
-dev = ["pytest>=7.0", "ruff>=0.4.0"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0"]
 
 [build-system]
 requires = ["hatchling"]
@@ -66,3 +66,14 @@ quote-style = "double"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["mempalace"]
+
+[tool.coverage.report]
+fail_under = 30
+show_missing = true
+exclude_lines = [
+    "if __name__",
+    "pragma: no cover",
+]

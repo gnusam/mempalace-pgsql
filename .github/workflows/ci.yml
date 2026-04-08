@@ -39,7 +39,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y postgresql-client
           PGPASSWORD=mempalace psql -h localhost -p 5433 -U mempalace -d mempalace -f mempalace/init_schema.sql
       - run: pip install -e ".[dev]"
-      - run: python -m pytest tests/ -v
+      - run: python -m pytest tests/ -v --cov=mempalace --cov-report=term-missing --cov-fail-under=30
 
   lint:
     runs-on: ubuntu-latest
