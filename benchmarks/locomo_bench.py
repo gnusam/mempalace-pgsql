@@ -35,9 +35,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mempalace.db import PalaceDB, get_db, embed
+from mempalace.db import embed
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://mempalace:mempalace@localhost:5433/mempalace")
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql://mempalace:mempalace@localhost:5433/mempalace"
+)
 
 
 # ── In-memory vector collection (replaces ChromaDB) ─────────────────────────
@@ -102,7 +104,12 @@ class _BenchCollection:
         out_docs = [self._docs[indices[i]] for i in top_idx]
         out_metas = [self._metas[indices[i]] for i in top_idx]
         out_dists = [float(distances[i]) for i in top_idx]
-        return {"ids": [out_ids], "documents": [out_docs], "metadatas": [out_metas], "distances": [out_dists]}
+        return {
+            "ids": [out_ids],
+            "documents": [out_docs],
+            "metadatas": [out_metas],
+            "distances": [out_dists],
+        }
 
     def count(self):
         return len(self._docs)
@@ -863,9 +870,7 @@ def run_benchmark(
                 for sess in sessions:
                     summary = sess.get("summary", "")
                     overlap = (
-                        _kw_overlap(predicate_kws, summary)
-                        if (summary and predicate_kws)
-                        else 0.0
+                        _kw_overlap(predicate_kws, summary) if (summary and predicate_kws) else 0.0
                     )
                     room_scores.append((overlap, f"session_{sess['session_num']}"))
                 room_scores.sort(reverse=True)

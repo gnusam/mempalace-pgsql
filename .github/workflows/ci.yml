@@ -10,13 +10,34 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.9", "3.11", "3.13"]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: mempalace
+          POSTGRES_USER: mempalace
+          POSTGRES_PASSWORD: mempalace
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U mempalace"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgresql://mempalace:mempalace@localhost:5433/mempalace
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Load pgvector schema
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          PGPASSWORD=mempalace psql -h localhost -p 5433 -U mempalace -d mempalace -f mempalace/init_schema.sql
       - run: pip install -e ".[dev]"
       - run: python -m pytest tests/ -v
 

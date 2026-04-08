@@ -201,18 +201,22 @@ class TestAutoDetectFilter:
 class TestSkipDirs:
     def test_target_in_skip_dirs(self):
         from mempalace.miner import SKIP_DIRS
+
         assert "target" in SKIP_DIRS, "Rust target/ must be skipped"
 
     def test_vendor_in_skip_dirs(self):
         from mempalace.miner import SKIP_DIRS
+
         assert "vendor" in SKIP_DIRS, "PHP/Go vendor/ must be skipped"
 
     def test_storage_in_skip_dirs(self):
         from mempalace.miner import SKIP_DIRS
+
         assert "storage" in SKIP_DIRS, "Laravel storage/ must be skipped"
 
     def test_node_modules_in_skip_dirs(self):
         from mempalace.miner import SKIP_DIRS
+
         assert "node_modules" in SKIP_DIRS
 
 

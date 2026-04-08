@@ -20,7 +20,6 @@ import sys
 from pathlib import Path
 from collections import defaultdict
 
-from .config import MempalaceConfig
 from .db import get_db
 
 

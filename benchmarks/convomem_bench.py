@@ -38,9 +38,11 @@ ssl._create_default_https_context = ssl._create_unverified_context
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mempalace.db import PalaceDB, get_db, embed
+from mempalace.db import embed  # noqa: E402
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://mempalace:mempalace@localhost:5433/mempalace")
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql://mempalace:mempalace@localhost:5433/mempalace"
+)
 
 
 # ── In-memory vector collection (replaces ChromaDB) ─────────────────────────
@@ -105,10 +107,16 @@ class _BenchCollection:
         out_docs = [self._docs[indices[i]] for i in top_idx]
         out_metas = [self._metas[indices[i]] for i in top_idx]
         out_dists = [float(distances[i]) for i in top_idx]
-        return {"ids": [out_ids], "documents": [out_docs], "metadatas": [out_metas], "distances": [out_dists]}
+        return {
+            "ids": [out_ids],
+            "documents": [out_docs],
+            "metadatas": [out_metas],
+            "distances": [out_dists],
+        }
 
     def count(self):
         return len(self._docs)
+
 
 HF_BASE = "https://huggingface.co/datasets/Salesforce/ConvoMem/resolve/main/core_benchmark/evidence_questions"
 

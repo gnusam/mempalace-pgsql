@@ -70,6 +70,42 @@ docker compose run --rm mempalace mempalace search "why did we switch to GraphQL
 
 Projects are mounted read-only via Docker volumes. Edit `docker-compose.yml` to add your own project paths.
 
+### Configuration
+
+MemPalace reads its configuration from three sources, in priority order: **environment variables**, then `~/.config/mempalace/config.json`, then built-in defaults. Inside the Compose stack `DATABASE_URL` is already wired via `docker-compose.yml` — these variables only matter if you run the code outside the container or want to override defaults.
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `DATABASE_URL` | PostgreSQL connection string (used by `mempalace.db` and every CLI/MCP entrypoint). | `postgresql://mempalace:mempalace@localhost:5433/mempalace` |
+| `MEMPALACE_PALACE_PATH` | Path to the memory palace data directory (markdown mirror of the DB). `MEMPAL_PALACE_PATH` is accepted as a legacy alias. | `~/.mempalace/palace` |
+| `MEMPALACE_SOURCE_DIR` | Source directory scanned by `mempalace.split_mega_files` when mining conversation transcripts. | `~/Desktop/transcripts` |
+
+Example — running the CLI against a non-default Postgres on the host:
+
+```bash
+export DATABASE_URL=postgresql://mempalace:mempalace@db.local:5432/mempalace
+export MEMPALACE_PALACE_PATH=/data/mempalace/palace
+mempalace search "auth decisions"
+```
+
+Example — pointing the MCP server at a remote database:
+
+```bash
+DATABASE_URL=postgresql://user:pass@db.local:5432/mempalace \
+  claude mcp add mempalace -- python -m mempalace.mcp_server
+```
+
+A persistent alternative is `~/.config/mempalace/config.json`:
+
+```json
+{
+  "palace_path": "/data/mempalace/palace",
+  "database_url": "postgresql://mempalace:mempalace@db.local:5432/mempalace"
+}
+```
+
+Environment variables always win over the JSON file.
+
 ### GPU
 
 The app container uses `nvidia/cuda` with PyTorch CUDA. If you have an NVIDIA GPU with the container toolkit installed, embeddings run on GPU automatically. No configuration needed -- sentence-transformers detects CUDA and uses it.

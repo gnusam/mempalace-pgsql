@@ -10,9 +10,7 @@ Same palace as project mining. Different ingest strategy.
 
 import os
 import sys
-import hashlib
 from pathlib import Path
-from datetime import datetime
 from collections import defaultdict
 
 from .db import get_db
@@ -274,7 +272,7 @@ def mine_convos(
     print(f"  Wing:    {wing}")
     print(f"  Source:  {convo_path}")
     print(f"  Files:   {len(files)}")
-    print(f"  Palace:  PostgreSQL")
+    print("  Palace:  PostgreSQL")
     if dry_run:
         print("  DRY RUN — nothing will be filed")
     print(f"{'-' * 55}\n")
@@ -348,9 +346,13 @@ def mine_convos(
             if extract_mode == "general":
                 room_counts[chunk_room] += 1
             result = db.add_drawer(
-                wing=wing, room=chunk_room, content=chunk["content"],
-                source_file=source_file, chunk_index=chunk["chunk_index"],
-                agent=agent, metadata={"ingest_mode": "convos", "extract_mode": extract_mode},
+                wing=wing,
+                room=chunk_room,
+                content=chunk["content"],
+                source_file=source_file,
+                chunk_index=chunk["chunk_index"],
+                agent=agent,
+                metadata={"ingest_mode": "convos", "extract_mode": extract_mode},
             )
             if result:
                 drawers_added += 1

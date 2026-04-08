@@ -61,10 +61,10 @@ SKIP_DIRS = {
     ".ipynb_checkpoints",
     ".eggs",
     "htmlcov",
-    "target",       # Rust/Cargo build output
-    "vendor",       # PHP/Go vendored deps
+    "target",  # Rust/Cargo build output
+    "vendor",  # PHP/Go vendored deps
     ".gradle",
-    "storage",      # Laravel storage (logs, cache)
+    "storage",  # Laravel storage (logs, cache)
 }
 
 SKIP_FILENAMES = {

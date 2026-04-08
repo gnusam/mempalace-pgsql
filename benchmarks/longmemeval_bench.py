@@ -44,9 +44,11 @@ import numpy as np
 # Add mempal to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mempalace.db import PalaceDB, get_db, embed
+from mempalace.db import embed
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://mempalace:mempalace@localhost:5433/mempalace")
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql://mempalace:mempalace@localhost:5433/mempalace"
+)
 
 
 # ── In-memory vector collection (replaces ChromaDB EphemeralClient) ──────────
@@ -111,7 +113,12 @@ class _BenchCollection:
         out_docs = [self._docs[indices[i]] for i in top_idx]
         out_metas = [self._metas[indices[i]] for i in top_idx]
         out_dists = [float(distances[i]) for i in top_idx]
-        return {"ids": [out_ids], "documents": [out_docs], "metadatas": [out_metas], "distances": [out_dists]}
+        return {
+            "ids": [out_ids],
+            "documents": [out_docs],
+            "metadatas": [out_metas],
+            "distances": [out_dists],
+        }
 
     def count(self):
         return len(self._docs)
@@ -164,6 +171,7 @@ def session_id_from_corpus_id(corpus_id):
 # SHARED EPHEMERAL CLIENT
 # In-memory vector store — create a fresh _BenchCollection between queries.
 # =============================================================================
+
 
 def _fresh_collection(name="mempal_drawers"):
     """Create a fresh in-memory vector collection for benchmark isolation."""

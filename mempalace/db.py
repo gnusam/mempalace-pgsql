@@ -59,6 +59,7 @@ class PalaceDB:
                 self.dsn = env
             else:
                 from .config import MempalaceConfig
+
                 self.dsn = MempalaceConfig().database_url
         self._conn = None
 
@@ -81,8 +82,9 @@ class PalaceDB:
 
     # ── Drawers ──────────────────────────────────────────────────────────
 
-    def add_drawer(self, wing, room, content, source_file="", chunk_index=0,
-                   agent="mempalace", metadata=None):
+    def add_drawer(
+        self, wing, room, content, source_file="", chunk_index=0, agent="mempalace", metadata=None
+    ):
         # Use content hash when source_file is empty (MCP/diary entries)
         if source_file:
             hash_input = source_file + str(chunk_index)
@@ -98,8 +100,18 @@ class PalaceDB:
                    chunk_index, added_by, filed_at, metadata)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (id) DO NOTHING""",
-                (drawer_id, wing, room, content, emb, source_file,
-                 chunk_index, agent, datetime.now(), meta),
+                (
+                    drawer_id,
+                    wing,
+                    room,
+                    content,
+                    emb,
+                    source_file,
+                    chunk_index,
+                    agent,
+                    datetime.now(),
+                    meta,
+                ),
             )
             return drawer_id if cur.rowcount > 0 else None
         except Exception:
@@ -114,7 +126,7 @@ class PalaceDB:
     def get_drawers(self, where=None, limit=None, offset=0, include=None):
         """Get drawers with optional filters. Returns ChromaDB-compatible dict."""
         clauses, params = self._build_where(where)
-        sql = f"SELECT id, wing, room, content, source_file, chunk_index, added_by, filed_at, metadata FROM drawers"
+        sql = "SELECT id, wing, room, content, source_file, chunk_index, added_by, filed_at, metadata FROM drawers"
         if clauses:
             sql += f" WHERE {clauses}"
         sql += " ORDER BY filed_at DESC"
@@ -132,7 +144,8 @@ class PalaceDB:
         metadatas = []
         for r in rows:
             m = {
-                "wing": r["wing"], "room": r["room"],
+                "wing": r["wing"],
+                "room": r["room"],
                 "source_file": r["source_file"] or "",
                 "chunk_index": r["chunk_index"],
                 "added_by": r["added_by"] or "",
@@ -195,7 +208,8 @@ class PalaceDB:
             documents.append(r["content"])
             distances.append(float(r["distance"]))
             m = {
-                "wing": r["wing"], "room": r["room"],
+                "wing": r["wing"],
+                "room": r["room"],
                 "source_file": r["source_file"] or "",
                 "chunk_index": r["chunk_index"],
                 "added_by": r["added_by"] or "",
@@ -207,8 +221,10 @@ class PalaceDB:
             metadatas.append(m)
 
         return {
-            "ids": [ids], "documents": [documents],
-            "metadatas": [metadatas], "distances": [distances],
+            "ids": [ids],
+            "documents": [documents],
+            "metadatas": [metadatas],
+            "distances": [distances],
         }
 
     def delete_drawer(self, drawer_id):
@@ -263,8 +279,17 @@ class PalaceDB:
         )
         return eid
 
-    def add_triple(self, subject, predicate, obj, valid_from=None, valid_to=None,
-                   confidence=1.0, source_closet=None, source_file=None):
+    def add_triple(
+        self,
+        subject,
+        predicate,
+        obj,
+        valid_from=None,
+        valid_to=None,
+        confidence=1.0,
+        source_closet=None,
+        source_file=None,
+    ):
         sub_id = self._entity_id(subject)
         obj_id = self._entity_id(obj)
         pred_norm = predicate.lower().replace(" ", "_")
@@ -291,8 +316,17 @@ class PalaceDB:
             """INSERT INTO triples (id, subject, predicate, object, valid_from,
                valid_to, confidence, source_closet, source_file)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (triple_id, sub_id, pred_norm, obj_id, valid_from, valid_to,
-             confidence, source_closet, source_file),
+            (
+                triple_id,
+                sub_id,
+                pred_norm,
+                obj_id,
+                valid_from,
+                valid_to,
+                confidence,
+                source_closet,
+                source_file,
+            ),
         )
         return triple_id
 
@@ -312,13 +346,9 @@ class PalaceDB:
         results = []
 
         if direction in ("outgoing", "both"):
-            results += self._query_triples(
-                "t.subject = %s", eid, as_of, "outgoing"
-            )
+            results += self._query_triples("t.subject = %s", eid, as_of, "outgoing")
         if direction in ("incoming", "both"):
-            results += self._query_triples(
-                "t.object = %s", eid, as_of, "incoming"
-            )
+            results += self._query_triples("t.object = %s", eid, as_of, "incoming")
         return results
 
     def _query_triples(self, filter_clause, entity_id, as_of, direction):
@@ -342,17 +372,19 @@ class PalaceDB:
 
         results = []
         for r in rows:
-            results.append({
-                "direction": direction,
-                "subject": r["sub_name"],
-                "predicate": r["predicate"],
-                "object": r["obj_name"],
-                "valid_from": r["valid_from"],
-                "valid_to": r["valid_to"],
-                "confidence": r["confidence"],
-                "source_closet": r["source_closet"],
-                "current": r["valid_to"] is None,
-            })
+            results.append(
+                {
+                    "direction": direction,
+                    "subject": r["sub_name"],
+                    "predicate": r["predicate"],
+                    "object": r["obj_name"],
+                    "valid_from": r["valid_from"],
+                    "valid_to": r["valid_to"],
+                    "confidence": r["confidence"],
+                    "source_closet": r["source_closet"],
+                    "current": r["valid_to"] is None,
+                }
+            )
         return results
 
     def query_relationship(self, predicate, as_of=None):
@@ -370,12 +402,18 @@ class PalaceDB:
 
         cur = self.conn().cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(sql, params)
-        return [{
-            "subject": r["sub_name"], "predicate": r["predicate"],
-            "object": r["obj_name"], "valid_from": r["valid_from"],
-            "valid_to": r["valid_to"], "confidence": r["confidence"],
-            "current": r["valid_to"] is None,
-        } for r in cur.fetchall()]
+        return [
+            {
+                "subject": r["sub_name"],
+                "predicate": r["predicate"],
+                "object": r["obj_name"],
+                "valid_from": r["valid_from"],
+                "valid_to": r["valid_to"],
+                "confidence": r["confidence"],
+                "current": r["valid_to"] is None,
+            }
+            for r in cur.fetchall()
+        ]
 
     def timeline(self, entity_name=None):
         if entity_name:
@@ -398,11 +436,17 @@ class PalaceDB:
 
         cur = self.conn().cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(sql, params)
-        return [{
-            "subject": r["sub_name"], "predicate": r["predicate"],
-            "object": r["obj_name"], "valid_from": r["valid_from"],
-            "valid_to": r["valid_to"], "current": r["valid_to"] is None,
-        } for r in cur.fetchall()]
+        return [
+            {
+                "subject": r["sub_name"],
+                "predicate": r["predicate"],
+                "object": r["obj_name"],
+                "valid_from": r["valid_from"],
+                "valid_to": r["valid_to"],
+                "current": r["valid_to"] is None,
+            }
+            for r in cur.fetchall()
+        ]
 
     def kg_stats(self):
         cur = self.conn().cursor()
@@ -415,8 +459,10 @@ class PalaceDB:
         cur.execute("SELECT DISTINCT predicate FROM triples")
         types = [r[0] for r in cur.fetchall()]
         return {
-            "entities": entities, "triples": triples,
-            "current_facts": current, "expired_facts": triples - current,
+            "entities": entities,
+            "triples": triples,
+            "current_facts": current,
+            "expired_facts": triples - current,
             "relationship_types": types,
         }
 
@@ -432,14 +478,16 @@ class PalaceDB:
             name = facts.get("full_name", key.capitalize())
             etype = facts.get("type", "person")
             self.add_entity(
-                name, etype,
+                name,
+                etype,
                 {"gender": facts.get("gender", ""), "birthday": facts.get("birthday", "")},
             )
 
             parent = facts.get("parent")
             if parent:
-                self.add_triple(name, "child_of", parent.capitalize(),
-                                valid_from=facts.get("birthday"))
+                self.add_triple(
+                    name, "child_of", parent.capitalize(), valid_from=facts.get("birthday")
+                )
 
             partner = facts.get("partner")
             if partner:
@@ -447,23 +495,22 @@ class PalaceDB:
 
             relationship = facts.get("relationship", "")
             if relationship == "daughter":
-                self.add_triple(name, "is_child_of",
-                                facts.get("parent", "").capitalize() or name,
-                                valid_from=facts.get("birthday"))
+                self.add_triple(
+                    name,
+                    "is_child_of",
+                    facts.get("parent", "").capitalize() or name,
+                    valid_from=facts.get("birthday"),
+                )
             elif relationship == "husband":
-                self.add_triple(name, "is_partner_of",
-                                facts.get("partner", name).capitalize())
+                self.add_triple(name, "is_partner_of", facts.get("partner", name).capitalize())
             elif relationship == "brother":
-                self.add_triple(name, "is_sibling_of",
-                                facts.get("sibling", name).capitalize())
+                self.add_triple(name, "is_sibling_of", facts.get("sibling", name).capitalize())
             elif relationship == "dog":
-                self.add_triple(name, "is_pet_of",
-                                facts.get("owner", name).capitalize())
+                self.add_triple(name, "is_pet_of", facts.get("owner", name).capitalize())
                 self.add_entity(name, "animal")
 
             for interest in facts.get("interests", []):
-                self.add_triple(name, "loves", interest.capitalize(),
-                                valid_from="2025-01-01")
+                self.add_triple(name, "loves", interest.capitalize(), valid_from="2025-01-01")
 
     def _auto_detect_filter(self, query_text):
         """Check if query contains a wing or room name and return a filter."""

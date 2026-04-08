@@ -230,9 +230,7 @@ def cmd_compress(args):
                 comp_meta["compression_ratio"] = round(stats["ratio"], 1)
                 comp_meta["original_tokens"] = stats["original_tokens"]
                 db.upsert_compressed(doc_id, compressed, comp_meta)
-            print(
-                f"  Stored {len(compressed_entries)} compressed drawers in 'compressed' table."
-            )
+            print(f"  Stored {len(compressed_entries)} compressed drawers in 'compressed' table.")
         except Exception as e:
             print(f"  Error storing compressed drawers: {e}")
             sys.exit(1)

@@ -20,7 +20,6 @@ Tools (write):
 import sys
 import json
 import logging
-import hashlib
 from datetime import datetime
 
 from .config import MempalaceConfig
@@ -113,7 +112,10 @@ def tool_list_rooms(wing: str = None):
     db = _get_db()
     cur = db.conn().cursor()
     if wing:
-        cur.execute("SELECT room, count(*) FROM drawers WHERE wing = %s GROUP BY room ORDER BY count DESC", (wing,))
+        cur.execute(
+            "SELECT room, count(*) FROM drawers WHERE wing = %s GROUP BY room ORDER BY count DESC",
+            (wing,),
+        )
     else:
         cur.execute("SELECT room, count(*) FROM drawers GROUP BY room ORDER BY count DESC")
     rooms = {r[0]: r[1] for r in cur.fetchall()}
@@ -123,7 +125,9 @@ def tool_list_rooms(wing: str = None):
 def tool_get_taxonomy():
     db = _get_db()
     cur = db.conn().cursor()
-    cur.execute("SELECT wing, room, count(*) FROM drawers GROUP BY wing, room ORDER BY wing, count DESC")
+    cur.execute(
+        "SELECT wing, room, count(*) FROM drawers GROUP BY wing, room ORDER BY wing, count DESC"
+    )
     taxonomy = {}
     for w, r, c in cur.fetchall():
         if w not in taxonomy:
@@ -293,11 +297,17 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
     try:
         now = datetime.now()
         drawer_id = db.add_drawer(
-            wing=wing, room="diary", content=entry, source_file="",
-            chunk_index=0, agent=agent_name,
+            wing=wing,
+            room="diary",
+            content=entry,
+            source_file="",
+            chunk_index=0,
+            agent=agent_name,
             metadata={
-                "hall": "hall_diary", "topic": topic,
-                "type": "diary_entry", "agent": agent_name,
+                "hall": "hall_diary",
+                "topic": topic,
+                "type": "diary_entry",
+                "agent": agent_name,
                 "date": now.strftime("%Y-%m-%d"),
             },
         )

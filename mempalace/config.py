@@ -103,7 +103,9 @@ class MempalaceConfig:
         env_val = os.environ.get("DATABASE_URL")
         if env_val:
             return env_val
-        return self._file_config.get("database_url", "postgresql://mempalace:mempalace@localhost:5433/mempalace")
+        return self._file_config.get(
+            "database_url", "postgresql://mempalace:mempalace@localhost:5433/mempalace"
+        )
 
     @property
     def collection_name(self):

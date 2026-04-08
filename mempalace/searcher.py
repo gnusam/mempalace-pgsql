@@ -18,7 +18,9 @@ class SearchError(Exception):
     """Raised when search cannot proceed (e.g. query failure)."""
 
 
-def search(query: str, palace_path: str = None, wing: str = None, room: str = None, n_results: int = 5):
+def search(
+    query: str, palace_path: str = None, wing: str = None, room: str = None, n_results: int = 5
+):
     """
     Search the palace. Returns verbatim drawer content.
     Optionally filter by wing (project) or room (aspect).
@@ -94,7 +96,10 @@ def search_memories(
         results = db.query(query, n_results=n_results, where=where)
     except Exception as e:
         logger.error("Search error: %s", e)
-        return {"error": "Search failed", "hint": "Check that PostgreSQL is running and the palace has been mined."}
+        return {
+            "error": "Search failed",
+            "hint": "Check that PostgreSQL is running and the palace has been mined.",
+        }
 
     docs = results["documents"][0]
     metas = results["metadatas"][0]
