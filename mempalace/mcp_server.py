@@ -2,7 +2,7 @@
 """
 MemPalace MCP Server — read/write palace access for Claude Code
 ================================================================
-Install: claude mcp add mempalace -- python -m mempalace.mcp_server
+Install: claude mcp add mempalace -- python -m mempalace.mcp_server [--palace /path/to/palace]
 
 Tools (read):
   mempalace_status          — total drawers, wing/room breakdown
@@ -17,6 +17,8 @@ Tools (write):
   mempalace_delete_drawer   — remove a drawer by ID
 """
 
+import argparse
+import os
 import sys
 import json
 import logging
@@ -30,6 +32,24 @@ from .db import get_db
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(description="MemPalace MCP Server")
+    parser.add_argument(
+        "--palace",
+        metavar="PATH",
+        help="Path to the palace directory (overrides config file and MEMPALACE_PALACE_PATH env var)",
+    )
+    # parse_known_args so unknown flags (e.g. passed by Claude Code wrappers) don't abort startup
+    args, _ = parser.parse_known_args()
+    return args
+
+
+_args = _parse_args()
+
+if _args.palace:
+    os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(_args.palace)
 
 _config = MempalaceConfig()
 
