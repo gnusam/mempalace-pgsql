@@ -673,7 +673,12 @@ def handle_request(request):
         }
     elif method == "tools/call":
         tool_name = params.get("name")
-        tool_args = params.get("arguments", {})
+        # `params.get("arguments", {})` returns None when the JSON payload
+        # explicitly contains `"arguments": null` — the subsequent `.items()`
+        # call would then crash and hang the MCP server. Use `or {}` so
+        # None falls through to an empty dict. Ported from upstream 0720fb8
+        # (PR #399, fixes #394), by @bensig.
+        tool_args = params.get("arguments") or {}
         if tool_name not in TOOLS:
             return {
                 "jsonrpc": "2.0",
