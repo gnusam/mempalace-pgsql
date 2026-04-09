@@ -98,21 +98,45 @@ class PalaceDB:
     def add_drawer(
         self, wing, room, content, source_file="", chunk_index=0, agent="mempalace", metadata=None
     ):
-        # Use content hash when source_file is empty (MCP/diary entries)
+        # Mining path: ID = hash(source_file + chunk_index) — deterministic
+        # per file+chunk slot so re-mining a modified file targets the same
+        # row and can update it via the ON CONFLICT DO UPDATE clause below.
+        #
+        # MCP / diary path: ID = hash(content) — deterministic per content,
+        # so re-filing identical content is idempotent (same ID → upsert
+        # becomes a no-op UPDATE with the same values). This replaces the
+        # old content[:200] + datetime.now() hash which produced a fresh ID
+        # every call and let the same content pile up as duplicates; it is
+        # also the fix for upstream findings #6 (TOCTOU) and #13 (non-
+        # deterministic IDs).
         if source_file:
             hash_input = source_file + str(chunk_index)
         else:
-            hash_input = content[:200] + datetime.now().isoformat()
+            hash_input = content
         drawer_id = f"drawer_{wing}_{room}_{hashlib.md5(hash_input.encode()).hexdigest()[:16]}"
         emb = embed([content])[0]
         meta = json.dumps(metadata or {})
         cur = self.conn().cursor()
         try:
+            # Upsert so that re-mining a modified file actually updates the
+            # row instead of being silently dropped (the old ON CONFLICT DO
+            # NOTHING was the data-stagnation bug from upstream finding #11).
+            # For content-based MCP IDs the upsert is a no-op when content
+            # is unchanged and idempotent when it is.
             cur.execute(
                 """INSERT INTO drawers (id, wing, room, content, embedding, source_file,
                    chunk_index, added_by, filed_at, metadata)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (id) DO NOTHING""",
+                   ON CONFLICT (id) DO UPDATE SET
+                     wing        = EXCLUDED.wing,
+                     room        = EXCLUDED.room,
+                     content     = EXCLUDED.content,
+                     embedding   = EXCLUDED.embedding,
+                     source_file = EXCLUDED.source_file,
+                     chunk_index = EXCLUDED.chunk_index,
+                     added_by    = EXCLUDED.added_by,
+                     filed_at    = EXCLUDED.filed_at,
+                     metadata    = EXCLUDED.metadata""",
                 (
                     drawer_id,
                     wing,
@@ -126,7 +150,7 @@ class PalaceDB:
                     meta,
                 ),
             )
-            return drawer_id if cur.rowcount > 0 else None
+            return drawer_id
         except Exception:
             self.conn().rollback()
             raise

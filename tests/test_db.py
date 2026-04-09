@@ -57,12 +57,36 @@ class TestDrawerIDUniqueness:
         id2 = db.add_drawer("test_mcp", "notes", "Note about billing", source_file="")
         assert id1 != id2
 
-    def test_mine_drawer_dedup_by_source(self, db):
-        """Mine mode: same source_file + chunk_index should dedup (ON CONFLICT)."""
+    def test_mine_drawer_reupsert_by_source(self, db):
+        """Mine mode: re-filing same source_file + chunk_index updates the row.
+
+        This is the fix for upstream finding #11 (HIGH — add ignores updates):
+        re-mining a modified file used to silently drop the new content under
+        ON CONFLICT DO NOTHING. The new behaviour is a true upsert: same
+        deterministic slot ID, new content overwrites old.
+        """
         id1 = db.add_drawer("test_mine", "code", "content A", source_file="/a/b.py", chunk_index=0)
         id2 = db.add_drawer("test_mine", "code", "content B", source_file="/a/b.py", chunk_index=0)
         assert id1 is not None
-        assert id2 is None  # duplicate, should be skipped
+        assert id2 == id1  # same deterministic ID
+        # The stored content should be the latest one, not the first.
+        cur = db.conn().cursor()
+        cur.execute("SELECT content FROM drawers WHERE id = %s", (id1,))
+        assert cur.fetchone()[0] == "content B"
+
+    def test_mcp_add_drawer_is_idempotent_on_same_content(self, db):
+        """MCP path: filing the same content twice produces the same ID.
+
+        Regression for upstream findings #6 (TOCTOU) and #13 (non-deterministic
+        IDs): the old content[:200] + datetime.now() hash produced a fresh ID
+        on every call, letting identical content pile up as duplicates.
+        """
+        id1 = db.add_drawer("test_mcp_idem", "notes", "A unique note body", source_file="")
+        id2 = db.add_drawer("test_mcp_idem", "notes", "A unique note body", source_file="")
+        assert id1 is not None
+        assert id1 == id2
+        # Only one row should exist.
+        assert db.count(where={"wing": "test_mcp_idem"}) == 1
 
 
 # ── Filtered vector search (regression: HNSW + WHERE) ───────────────────
