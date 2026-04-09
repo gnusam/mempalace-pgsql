@@ -74,11 +74,35 @@ SKIP_FILENAMES = {
     "mempal.yml",
     ".gitignore",
     "package-lock.json",
+    "yarn.lock",
+    "composer.lock",
+    "Cargo.lock",
+    "poetry.lock",
+    "pnpm-lock.yaml",
 }
+
+# Glob-style suffix patterns skipped even when the extension is otherwise
+# readable. Minified bundles are semantic-search noise — long lines, low
+# entropy, and they drown real content in the top-k.
+SKIP_FILENAME_PATTERNS = (
+    ".min.js",
+    ".min.css",
+    ".min.mjs",
+    ".bundle.js",
+    "-bundle.js",
+    ".umd.js",
+    ".esm.js",
+    ".prod.js",
+)
 
 CHUNK_SIZE = 800  # chars per drawer
 CHUNK_OVERLAP = 100  # overlap between chunks
 MIN_CHUNK_SIZE = 50  # skip tiny chunks
+
+# Average line length above this marks a file as minified / machine-generated.
+# Hand-written code rarely exceeds ~200 chars/line; minified JS/CSS routinely
+# hits thousands. Files above this threshold are skipped entirely.
+MAX_AVG_LINE_LENGTH = 400
 
 
 # =============================================================================
@@ -442,6 +466,14 @@ def process_file(
     if len(content) < MIN_CHUNK_SIZE:
         return 0, None
 
+    # Reject minified / machine-generated content by average line length.
+    # Filename-based skip (SKIP_FILENAME_PATTERNS) catches the common cases;
+    # this is the fallback for oddly-named bundles and generated JSON blobs
+    # (e.g. Symfony Intl CLDR data, which is one huge JSON object per file).
+    line_count = content.count("\n") + 1
+    if len(content) / line_count > MAX_AVG_LINE_LENGTH:
+        return 0, None
+
     room = detect_room(filepath, content, rooms, project_path)
     chunks = chunk_text(content, source_file)
 
@@ -517,6 +549,14 @@ def scan_project(
 
             if not force_include and filename in SKIP_FILENAMES:
                 continue
+            # Skip minified bundles by filename pattern (e.g. foo.min.js,
+            # swagger-ui-bundle.js). These are noise for semantic search
+            # and previously polluted whole wings (datahub/public held 4574
+            # drawers of swagger assets).
+            if not force_include:
+                lowered = filename.lower()
+                if any(lowered.endswith(pat) for pat in SKIP_FILENAME_PATTERNS):
+                    continue
             if filepath.suffix.lower() not in READABLE_EXTENSIONS and not exact_force_include:
                 continue
             if respect_gitignore and active_matchers and not force_include:
