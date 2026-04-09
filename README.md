@@ -34,18 +34,18 @@ Everything else stays the same: the palace structure (wings, rooms, halls, tunne
 
 ### Performance
 
-Benchmarked on 511k drawers across 30 projects:
+Benchmarked on 275k drawers across 32 projects (post-purge of minified/vendored noise), HNSW tuned for real recall (`m=32, ef_construction=200, ef_search=500`):
 
 | Metric | This fork (pgvector) | Upstream (ChromaDB) |
 |---|---|---|
-| **Global search** | **99ms** avg | ~250ms |
-| **Filtered search** | **93ms** avg | N/A (segfault on Python 3.14) |
-| **Embed (GPU batch)** | **3.4ms/text** | ~5ms/text (CPU ONNX) |
-| **Insert** | 10ms/drawer | ~10ms/drawer |
+| **Global search** | ~220 ms median | ~250 ms |
+| **Filtered search (by wing)** | ~100 ms median | N/A (segfault on Python 3.14) |
+| **Embed (GPU)** | ~6 ms/text | ~5 ms/text (CPU ONNX) |
+| **Insert** | ~10 ms/drawer | ~10 ms/drawer |
 | **Dedup threshold** | 0.947 cosine (more discriminant) | ~0.9 L2 |
-| **Parallel mining** | 4 workers, zero corruption | Impossible (SQLite lock) |
+| **Parallel mining** | 4 workers, zero DB contention | Impossible (SQLite lock) |
 
-Cosine distance (this fork) is better suited for text embeddings than L2 (upstream). Similarity scores are not directly comparable between the two, but ranking quality is equivalent or better.
+Cosine distance (this fork) is better suited for text embeddings than L2 (upstream). The global-search latency is higher than a naive HNSW benchmark would show because `ef_search=500` is non-default — it trades a few hundred ms for correct recall on a 250k+ corpus. The stock pgvector default (`ef_search=40`) returns top-10 results in <100 ms but with near-zero recall on out-of-distribution queries; the latency table above is the price of honest ranking.
 
 ---
 
