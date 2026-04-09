@@ -5,7 +5,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY pyproject.toml ./
+# pyproject.toml declares README.md as the package readme — hatchling
+# fails metadata generation without it, so we have to copy both.
+COPY pyproject.toml README.md ./
 COPY mempalace/ ./mempalace/
 
 RUN python3.12 -m venv /opt/venv
