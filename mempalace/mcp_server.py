@@ -24,6 +24,8 @@ import json
 import logging
 from datetime import datetime
 
+import psycopg2
+
 from .config import MempalaceConfig
 from .version import __version__
 from .searcher import search_memories
@@ -169,7 +171,12 @@ def tool_search(query: str, limit: int = 5, wing: str = None, room: str = None):
 def tool_check_duplicate(content: str, threshold: float = 0.9):
     db = _get_db()
     try:
-        results = db.query(content, n_results=5)
+        # auto_detect=False: when checking duplicates we want to search the
+        # ENTIRE palace, not get scoped to whichever wing/room name happens
+        # to appear inside the content being checked. The auto-detect path
+        # also forces a seq scan which, on 400k+ drawers, can exceed
+        # statement_timeout and poison the connection.
+        results = db.query(content, n_results=5, auto_detect=False)
         duplicates = []
         if results["ids"] and results["ids"][0]:
             for i, drawer_id in enumerate(results["ids"][0]):
@@ -691,12 +698,34 @@ def handle_request(request):
                 "id": req_id,
                 "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]},
             }
-        except Exception:
+        except Exception as exc:
             logger.exception(f"Tool error in {tool_name}")
+            # Reset the DB connection on transport-level failures so the next
+            # tool call gets a fresh connection instead of inheriting an
+            # aborted-transaction state from the failed one.
+            if isinstance(
+                exc,
+                (
+                    psycopg2.OperationalError,
+                    psycopg2.InterfaceError,
+                    psycopg2.errors.InFailedSqlTransaction,
+                ),
+            ):
+                try:
+                    _get_db().reset()
+                except Exception:
+                    pass
+            # Surface the actual exception so clients (and humans reading the
+            # MCP log) can see WHY a call failed instead of a generic
+            # "Internal tool error" — the latter made today's debugging
+            # impossible. Trim to keep payloads bounded.
+            detail = f"{type(exc).__name__}: {exc}"
+            if len(detail) > 500:
+                detail = detail[:497] + "..."
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": -32000, "message": "Internal tool error"},
+                "error": {"code": -32000, "message": f"Tool error in {tool_name}: {detail}"},
             }
 
     return {

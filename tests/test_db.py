@@ -194,6 +194,42 @@ class TestAutoDetectFilter:
         # (we test the len > 2 guard)
         assert detected is None or len(list(detected.values())[0]) > 2
 
+    def test_auto_detect_disabled(self, db):
+        """Regression (2026-04-09): check_duplicate must search the whole
+        palace. Passing auto_detect=False must skip the wing/room matching."""
+        db.add_drawer("test_adoff", "code", "unique sentinel content alpha beta gamma")
+        # Query text contains "test_adoff" literally, which would normally
+        # trigger the auto-filter. With auto_detect=False, the search must
+        # not be constrained to that wing.
+        results = db.query(
+            "test_adoff contains sentinel alpha beta gamma",
+            n_results=5,
+            auto_detect=False,
+        )
+        assert "ids" in results
+        # No constraint means the result set can include drawers from other
+        # wings, so we assert only that the call succeeds and returns.
+
+    def test_query_rollback_on_failure_keeps_connection_usable(self, db):
+        """Regression (2026-04-09): a failing filtered query used to leave
+        autocommit=False + an aborted transaction, poisoning the connection
+        and making every subsequent call return KO. The try/finally fix in
+        db.query must recover cleanly."""
+        # Force a failure by giving an invalid where key that _build_where
+        # will emit as-is and postgres will reject. Use a column that does
+        # not exist on the drawers table.
+        try:
+            db.query("anything", n_results=3, where={"no_such_column": "x"})
+        except Exception:
+            pass  # expected — SQL will reject unknown column
+        # The connection must still be usable. This used to fail with
+        # "current transaction is aborted, commands ignored until end of
+        # transaction block".
+        results = db.query("another query", n_results=3)
+        assert "ids" in results
+        # Autocommit must be restored to its original True state.
+        assert db.conn().autocommit is True
+
 
 # ── Skip directories ────────────────────────────────────────────────────
 

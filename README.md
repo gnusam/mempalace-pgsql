@@ -222,6 +222,13 @@ For the full documentation on the palace concept, AAAK dialect, memory layers, b
 
 Changes on top of upstream are limited to the storage backend, with improvements to search (wing auto-detection, cosine distance) and ops (Docker Compose, parallel workers).
 
+**Fork-specific MCP reliability fixes (2026-04-09):**
+
+- `db.query` now restores `autocommit` and rolls back in a `try/finally`, so a failing filtered search no longer leaves the connection in an aborted-transaction state that poisons every subsequent `check_duplicate` / `search` call (previously observed as `mempalace_check_duplicate` returning KO after the first slow query).
+- `db.query` gained an `auto_detect` flag; `mempalace_check_duplicate` now calls it with `auto_detect=False` so a room/wing name appearing inside the content being checked no longer scopes the duplicate search to that wing and no longer forces a full sequential scan — this was the root cause of the `mempalace_add_drawer` connection drop on multi-KB payloads, since `add_drawer` calls `check_duplicate` internally and long content was much more likely to match a room name.
+- `_auto_detect_filter` skips NULL/empty wings and rooms instead of crashing on `None.lower()`.
+- The MCP handler surfaces the actual exception type and message (bounded to 500 chars) instead of a generic "Internal tool error", and calls `db.reset()` on `OperationalError` / `InterfaceError` / `InFailedSqlTransaction` so the next tool call gets a fresh connection. Two regression tests were added in `tests/test_db.py::TestAutoDetectFilter`.
+
 ---
 
 ## How You Actually Use It

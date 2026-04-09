@@ -74,6 +74,19 @@ class PalaceDB:
         if self._conn and not self._conn.closed:
             self._conn.close()
 
+    def reset(self):
+        """Close the current connection so the next conn() call reconnects.
+
+        Used by callers after a failure that may have left the connection in an
+        aborted-transaction state (e.g. statement_timeout during a forced seq
+        scan). The next operation gets a fresh, healthy connection.
+        """
+        try:
+            if self._conn and not self._conn.closed:
+                self._conn.close()
+        finally:
+            self._conn = None
+
     def init_schema(self):
         """Create tables if they don't exist."""
         schema_path = Path(__file__).parent / "init_schema.sql"
@@ -158,49 +171,64 @@ class PalaceDB:
 
         return {"ids": ids, "documents": documents, "metadatas": metadatas}
 
-    def query(self, query_text, n_results=5, where=None):
-        """Semantic search with automatic wing/room name matching.
+    def query(self, query_text, n_results=5, where=None, auto_detect=True):
+        """Semantic search with optional automatic wing/room name matching.
 
-        If the query matches a wing or room name and no explicit filter
-        is given, auto-filter to that wing/room for relevant results.
+        If ``auto_detect`` is true and no explicit filter is given, we inspect
+        the query text for a wing or room name and auto-scope to it. Callers
+        that want to search the whole palace (e.g. duplicate detection, where
+        a room name inside the content should NOT constrain the search) must
+        pass ``auto_detect=False``.
         """
         # Auto-detect wing/room name in query when no filter specified
-        if not where:
+        if where is None and auto_detect:
             where = self._auto_detect_filter(query_text)
 
         emb = embed([query_text])[0]
         clauses, params = self._build_where(where)
 
-        cur = self.conn().cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        conn = self.conn()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         if clauses:
             # HNSW doesn't support pre-filtering. Wrap in a transaction
             # with index scans disabled to force sequential scan.
-            old_autocommit = self.conn().autocommit
-            self.conn().autocommit = False
-            cur.execute("SET LOCAL enable_indexscan = off")
-            cur.execute("SET LOCAL enable_bitmapscan = off")
-            sql = f"""SELECT id, wing, room, content, source_file, chunk_index,
-                             added_by, filed_at, metadata,
-                             embedding <=> %s AS distance
-                      FROM drawers WHERE {clauses}
-                      ORDER BY distance LIMIT {int(n_results)}"""
-            query_params = [emb] + params
+            #
+            # We must restore autocommit (and rollback on failure) even when
+            # the query raises, or the connection is left in an aborted-
+            # transaction state and every subsequent call fails with
+            # "current transaction is aborted, commands ignored until end of
+            # transaction block". This used to corrupt the long-lived MCP
+            # server connection after the first slow query hit a timeout.
+            old_autocommit = conn.autocommit
+            conn.autocommit = False
+            try:
+                cur.execute("SET LOCAL enable_indexscan = off")
+                cur.execute("SET LOCAL enable_bitmapscan = off")
+                sql = f"""SELECT id, wing, room, content, source_file, chunk_index,
+                                 added_by, filed_at, metadata,
+                                 embedding <=> %s AS distance
+                          FROM drawers WHERE {clauses}
+                          ORDER BY distance LIMIT {int(n_results)}"""
+                cur.execute(sql, [emb] + params)
+                rows = cur.fetchall()
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                conn.autocommit = old_autocommit
         else:
             sql = f"""SELECT id, wing, room, content, source_file, chunk_index,
                             added_by, filed_at, metadata,
                             embedding <=> %s AS distance
                      FROM drawers
                      ORDER BY distance LIMIT {int(n_results)}"""
-            query_params = [emb]
-
-        cur.execute(sql, query_params)
-        rows = cur.fetchall()
-
-        # Restore autocommit if we changed it
-        if clauses:
-            self.conn().commit()
-            self.conn().autocommit = old_autocommit
+            cur.execute(sql, [emb])
+            rows = cur.fetchall()
 
         ids, documents, metadatas, distances = [], [], [], []
         for r in rows:
@@ -513,26 +541,32 @@ class PalaceDB:
                 self.add_triple(name, "loves", interest.capitalize(), valid_from="2025-01-01")
 
     def _auto_detect_filter(self, query_text):
-        """Check if query contains a wing or room name and return a filter."""
+        """Check if query contains a wing or room name and return a filter.
+
+        NULL/empty wing/room rows are skipped — ``None.lower()`` used to raise
+        AttributeError and propagate up as an opaque KO.
+        """
         query_lower = query_text.lower().strip()
-        query_words = set(query_lower.replace("-", "_").replace(" ", "_").split("_"))
+        normalized = query_lower.replace(" ", "_").replace("-", "_")
+        query_words = set(normalized.split("_"))
         cur = self.conn().cursor()
 
         # Check exact wing match
-        cur.execute("SELECT DISTINCT wing FROM drawers")
+        cur.execute("SELECT DISTINCT wing FROM drawers WHERE wing IS NOT NULL AND wing <> ''")
         wings = [r[0] for r in cur.fetchall()]
         for w in wings:
-            if w.lower() == query_lower.replace(" ", "_").replace("-", "_"):
+            w_lower = w.lower()
+            if w_lower == normalized:
                 return {"wing": w}
             # Also match if wing name is a significant word in the query
-            if w.lower() in query_words and len(w) > 2:
+            if w_lower in query_words and len(w) > 2:
                 return {"wing": w}
 
         # Check exact room match
-        cur.execute("SELECT DISTINCT room FROM drawers")
+        cur.execute("SELECT DISTINCT room FROM drawers WHERE room IS NOT NULL AND room <> ''")
         rooms = [r[0] for r in cur.fetchall()]
         for r in rooms:
-            if r.lower() == query_lower.replace(" ", "_").replace("-", "_"):
+            if r.lower() == normalized:
                 return {"room": r}
 
         return None
