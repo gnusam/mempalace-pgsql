@@ -145,6 +145,8 @@ docker-compose.yml
 
 Vector search uses pgvector's HNSW index with cosine distance for global queries. When a query matches a wing or room name, the search auto-filters to that scope and falls back to sequential scan (HNSW doesn't support pre-filtering). The embedding model (`all-MiniLM-L6-v2`, 384 dimensions) is the same as upstream MemPalace.
 
+**HNSW tuning.** The index is built with `WITH (m = 32, ef_construction = 200)` (vs pgvector defaults 16/64) and queries run with `SET LOCAL hnsw.ef_search = 500` (vs default 40). These non-default values are necessary for recall on corpora over ~100 k drawers — the stock pgvector defaults produced ~0% recall@10 on a 400 k drawer palace, returning noise clusters while the true top-k stayed unreachable. Postgres itself is started with `maintenance_work_mem=4GB` + `shm_size=2GB` so REINDEX can hold the full HNSW graph in memory and run parallel maintenance workers; building under the default 64 MB silently degrades to an on-disk build with severely worse recall (watch for `NOTICE: hnsw graph no longer fits into maintenance_work_mem after N tuples` in the REINDEX output — if you see it, the build is bad).
+
 Metadata queries (`list_wings`, `list_rooms`, `get_taxonomy`, `status`) use direct `GROUP BY` SQL rather than fetching rows -- instant even on 400k+ drawers.
 
 ### Mining hygiene
@@ -157,6 +159,13 @@ coverage  .mempalace  .ruff_cache  .mypy_cache  .pytest_cache  .cache
 .tox  .nox  .idea  .vscode  .ipynb_checkpoints  .eggs  htmlcov
 target  vendor  .gradle  storage
 ```
+
+Additional anti-noise filters applied to each file:
+- **Minified bundles** skipped by filename pattern: `*.min.js`, `*.min.css`, `*.min.mjs`, `*-bundle.js`, `*.bundle.js`, `*.umd.js`, `*.esm.js`, `*.prod.js`.
+- **Machine-generated files** skipped by average line length: any file whose `len(content) / line_count > 400` is dropped. Hand-written code rarely exceeds ~200 chars/line; minified JS/CSS and dumped JSON blobs (e.g. Symfony Intl CLDR data) hit thousands.
+- **Lockfiles** skipped by name: `package-lock.json`, `yarn.lock`, `composer.lock`, `Cargo.lock`, `poetry.lock`, `pnpm-lock.yaml`.
+
+These were added after a diagnostic session revealed that minified Swagger assets and vendored CLDR JSON had polluted ~32% of the palace (130 k of 405 k drawers) and were drowning real documentation in the semantic-search top-k.
 
 Override at mine time:
 
