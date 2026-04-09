@@ -282,13 +282,33 @@ class PalaceDB:
             finally:
                 conn.autocommit = old_autocommit
         else:
-            sql = f"""SELECT id, wing, room, content, source_file, chunk_index,
-                            added_by, filed_at, metadata,
-                            embedding <=> %s AS distance
-                     FROM drawers
-                     ORDER BY distance LIMIT {int(n_results)}"""
-            cur.execute(sql, [emb])
-            rows = cur.fetchall()
+            # Unfiltered HNSW path. The pgvector default `hnsw.ef_search=40`
+            # is too low for a 400k+ drawer corpus — greedy nearest-neighbor
+            # search gets stuck in a local cluster of noise and misses the
+            # true top-k by a wide margin (measured recall@10 ≈ 0% on
+            # short queries). Wrap in a transaction and bump ef_search
+            # locally so every search gets the wider exploration without
+            # affecting other sessions.
+            old_autocommit = conn.autocommit
+            conn.autocommit = False
+            try:
+                cur.execute("SET LOCAL hnsw.ef_search = 500")
+                sql = f"""SELECT id, wing, room, content, source_file, chunk_index,
+                                added_by, filed_at, metadata,
+                                embedding <=> %s AS distance
+                         FROM drawers
+                         ORDER BY distance LIMIT {int(n_results)}"""
+                cur.execute(sql, [emb])
+                rows = cur.fetchall()
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                conn.autocommit = old_autocommit
 
         ids, documents, metadatas, distances = [], [], [], []
         for r in rows:
