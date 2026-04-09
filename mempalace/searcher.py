@@ -27,7 +27,11 @@ def search(
     """
     db = get_db()
 
-    where = {}
+    # Leave where=None when no explicit filter is given so db.query() runs
+    # its auto-detect path (catches "datahub" → wing=datahub, etc). Passing
+    # an empty dict here silently disables auto-detect because db.query
+    # tests `if where is None`.
+    where = None
     if wing and room:
         where = {"$and": [{"wing": wing}, {"room": room}]}
     elif wing:
@@ -84,7 +88,11 @@ def search_memories(
     """
     db = get_db()
 
-    where = {}
+    # Leave where=None when no explicit filter is given so db.query() runs
+    # its auto-detect path (catches "datahub" → wing=datahub, etc). Passing
+    # an empty dict here silently disables auto-detect because db.query
+    # tests `if where is None`.
+    where = None
     if wing and room:
         where = {"$and": [{"wing": wing}, {"room": room}]}
     elif wing:
