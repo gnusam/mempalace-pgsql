@@ -115,7 +115,16 @@ class PalaceDB:
             hash_input = content
         drawer_id = f"drawer_{wing}_{room}_{hashlib.md5(hash_input.encode()).hexdigest()[:16]}"
         emb = embed([content])[0]
-        meta = json.dumps(metadata or {})
+        # Stamp source_mtime on mining drawers so file_already_mined() can
+        # detect when a file has been edited since it was last mined. We
+        # merge into any caller-supplied metadata rather than replacing it.
+        meta_dict = dict(metadata or {})
+        if source_file and "source_mtime" not in meta_dict:
+            try:
+                meta_dict["source_mtime"] = os.path.getmtime(source_file)
+            except OSError:
+                pass
+        meta = json.dumps(meta_dict)
         cur = self.conn().cursor()
         try:
             # Upsert so that re-mining a modified file actually updates the
@@ -156,9 +165,36 @@ class PalaceDB:
             raise
 
     def file_already_mined(self, source_file):
+        """Fast check: has this file been filed before AND is unchanged?
+
+        We compare the file's current mtime against ``source_mtime`` stored in
+        the drawer's metadata. Returns False (re-mine needed) when:
+          - no prior drawer exists for this source_file,
+          - no source_mtime was stored (first-time import from a pre-mtime build), or
+          - the file's current mtime differs from the stored one.
+
+        This is the second half of the port of upstream bf88daa: content-hash
+        / upsert semantics already let a modified file update its rows, but we
+        also need to stop the miner from short-circuiting modified files as
+        "already mined" at the scan stage.
+        """
         cur = self.conn().cursor()
-        cur.execute("SELECT 1 FROM drawers WHERE source_file = %s LIMIT 1", (source_file,))
-        return cur.fetchone() is not None
+        cur.execute(
+            "SELECT metadata FROM drawers WHERE source_file = %s LIMIT 1",
+            (source_file,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False
+        stored_meta = row[0] or {}
+        stored_mtime = stored_meta.get("source_mtime") if isinstance(stored_meta, dict) else None
+        if stored_mtime is None:
+            return False
+        try:
+            current_mtime = os.path.getmtime(source_file)
+        except OSError:
+            return False
+        return float(stored_mtime) == current_mtime
 
     def get_drawers(self, where=None, limit=None, offset=0, include=None):
         """Get drawers with optional filters. Returns ChromaDB-compatible dict."""

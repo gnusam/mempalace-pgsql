@@ -168,9 +168,64 @@ class TestFileAlreadyMined:
     def test_returns_false_for_new_file(self, db):
         assert db.file_already_mined("/nonexistent/path.py") is False
 
-    def test_returns_true_after_mining(self, db):
-        db.add_drawer("test_mined", "code", "content", source_file="/test/mined.py")
-        assert db.file_already_mined("/test/mined.py") is True
+    def test_returns_false_for_nonexistent_source(self, db):
+        """Source file stored in a drawer but no longer present on disk
+        should not count as "already mined" — the os.getmtime call fails
+        and we return False so the caller can decide what to do."""
+        db.add_drawer("test_mined_gone", "code", "content", source_file="/gone/missing.py")
+        assert db.file_already_mined("/gone/missing.py") is False
+
+    def test_returns_true_for_unchanged_file(self, tmp_path, db):
+        """Regression (2026-04-09, port of upstream bf88daa): the miner
+        must skip files whose mtime matches what we stored, and re-mine
+        any file whose mtime has changed."""
+        f = tmp_path / "stable.py"
+        f.write_text("original content")
+        db.add_drawer("test_mtime", "code", "original content", source_file=str(f))
+        assert db.file_already_mined(str(f)) is True
+
+    def test_returns_false_after_file_modified(self, tmp_path, db):
+        """Modifying the file must invalidate the 'already mined' cache."""
+        import os as _os
+        import time as _time
+
+        f = tmp_path / "mod.py"
+        f.write_text("v1")
+        db.add_drawer("test_mtime_mod", "code", "v1", source_file=str(f))
+        assert db.file_already_mined(str(f)) is True
+        # Bump mtime to simulate an edit (touch with a later timestamp so
+        # we don't depend on real wall-clock granularity).
+        new_mtime = _os.path.getmtime(str(f)) + 10
+        _os.utime(str(f), (new_mtime, new_mtime))
+        _ = _time  # silence unused if we later remove the helper
+        assert db.file_already_mined(str(f)) is False
+
+    def test_returns_false_when_no_mtime_stored(self, db):
+        """Legacy rows written before the source_mtime port must trigger
+        a re-mine so the upgrade path fills in the mtime. We simulate by
+        writing a row directly with no mtime in metadata."""
+        cur = db.conn().cursor()
+        import numpy as np
+
+        emb = np.zeros(384, dtype=np.float32)
+        cur.execute(
+            """INSERT INTO drawers (id, wing, room, content, embedding, source_file,
+               chunk_index, added_by, filed_at, metadata)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now(), %s)
+               ON CONFLICT (id) DO NOTHING""",
+            (
+                "test_legacy_nomtime",
+                "test_legacy",
+                "code",
+                "legacy content",
+                emb,
+                "/legacy/path.py",
+                0,
+                "mempalace",
+                "{}",
+            ),
+        )
+        assert db.file_already_mined("/legacy/path.py") is False
 
 
 # ── Compressed (AAAK) ───────────────────────────────────────────────────
