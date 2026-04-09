@@ -14,6 +14,7 @@ Commands:
     mempalace mine <dir>                  Mine project files (default)
     mempalace mine <dir> --mode convos    Mine conversation exports
     mempalace search "query"              Find anything, exact words
+    mempalace mcp                         Show MCP setup command (Docker Compose invocation)
     mempalace wake-up                     Show L0 + L1 wake-up context
     mempalace wake-up --wing my_app       Wake-up for a specific project
     mempalace status                      Show what's been filed
@@ -28,6 +29,7 @@ Examples:
 
 import os
 import sys
+import shlex
 import argparse
 from pathlib import Path
 
@@ -153,6 +155,33 @@ def cmd_status(args):
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     status(palace_path=palace_path)
+
+
+def cmd_mcp(args):
+    """Show how to wire MemPalace into MCP-capable hosts (Docker Compose fork).
+
+    Adapted from upstream 2981433 (PR #315), by @kpulik. Upstream prints the
+    `python -m mempalace.mcp_server` invocation which assumes a pip-install;
+    this fork's delivery model is Docker Compose, so the printed commands
+    wrap the module invocation in `docker compose run`.
+    """
+    base_cmd = "docker compose run --rm -i --entrypoint python mempalace -m mempalace.mcp_server"
+
+    if args.palace:
+        resolved_palace = str(Path(args.palace).expanduser())
+        server_cmd = f"{base_cmd} --palace {shlex.quote(resolved_palace)}"
+    else:
+        server_cmd = base_cmd
+
+    print("MemPalace MCP quick setup (Docker Compose fork):")
+    print(f"  claude mcp add mempalace -- {server_cmd}")
+    print("\nRun the server directly:")
+    print(f"  {server_cmd}")
+
+    if not args.palace:
+        print("\nOptional custom palace:")
+        print(f"  claude mcp add mempalace -- {base_cmd} --palace /path/to/palace")
+        print(f"  {base_cmd} --palace /path/to/palace")
 
 
 def cmd_compress(args):
@@ -348,6 +377,12 @@ def main():
         help="Only split files containing at least N sessions (default: 2)",
     )
 
+    # mcp
+    sub.add_parser(
+        "mcp",
+        help="Show MCP setup command for connecting MemPalace to your AI client",
+    )
+
     # status
     sub.add_parser("status", help="Show what's been filed")
 
@@ -362,6 +397,7 @@ def main():
         "mine": cmd_mine,
         "split": cmd_split,
         "search": cmd_search,
+        "mcp": cmd_mcp,
         "compress": cmd_compress,
         "wake-up": cmd_wakeup,
         "status": cmd_status,
