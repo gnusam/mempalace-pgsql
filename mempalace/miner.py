@@ -104,6 +104,12 @@ MIN_CHUNK_SIZE = 50  # skip tiny chunks
 # hits thousands. Files above this threshold are skipped entirely.
 MAX_AVG_LINE_LENGTH = 400
 
+# Hard ceiling on per-file size at scan time. Refuses to even open files
+# larger than this, which protects against pathological inputs (SQL dumps,
+# image blobs committed as text, etc). Ported from upstream 1d19dfc (PR #252,
+# based on @anthonyonazure's submission, polished by @bensig).
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
 
 # =============================================================================
 # IGNORE MATCHING
@@ -562,6 +568,17 @@ def scan_project(
             if respect_gitignore and active_matchers and not force_include:
                 if is_gitignored(filepath, active_matchers, is_dir=False):
                     continue
+            # Refuse symlinks outright — they can point anywhere (/dev/urandom,
+            # /proc, other people's home directories) and we don't want to
+            # chase them. Ported from upstream 1d19dfc.
+            if filepath.is_symlink():
+                continue
+            # Hard file-size ceiling. Ported from upstream 1d19dfc.
+            try:
+                if filepath.stat().st_size > MAX_FILE_SIZE:
+                    continue
+            except OSError:
+                continue
             files.append(filepath)
     return files
 

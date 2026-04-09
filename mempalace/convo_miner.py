@@ -43,6 +43,10 @@ SKIP_DIRS = {
 
 MIN_CHUNK_SIZE = 30
 
+# Hard ceiling on per-file size at scan time. Ported from upstream 1d19dfc
+# (PR #252) — protects against OOM on pathological transcript files.
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
 
 # =============================================================================
 # CHUNKING — exchange pairs for conversations
@@ -233,6 +237,15 @@ def scan_convos(convo_dir: str) -> list:
                 continue
             filepath = Path(root) / filename
             if filepath.suffix.lower() in CONVO_EXTENSIONS:
+                # Skip symlinks and oversized files. Ported from upstream
+                # 1d19dfc (PR #252).
+                if filepath.is_symlink():
+                    continue
+                try:
+                    if filepath.stat().st_size > MAX_FILE_SIZE:
+                        continue
+                except OSError:
+                    continue
                 files.append(filepath)
     return files
 
