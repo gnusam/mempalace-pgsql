@@ -1,10 +1,26 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    # Docker's default /dev/shm (64MB) is too small for pgvector HNSW
+    # parallel index builds — REINDEX with max_parallel_maintenance_workers>0
+    # fails with "could not resize shared memory segment: No space left on
+    # device". Bump shm_size so REINDEX can run multi-threaded at build time.
+    shm_size: 2gb
     environment:
       POSTGRES_DB: mempalace
       POSTGRES_USER: mempalace
       POSTGRES_PASSWORD: mempalace
+      # maintenance_work_mem must hold the entire HNSW graph during build,
+      # otherwise pgvector silently degrades to an on-disk build with much
+      # worse recall. 4GB is enough for 500k+ × 384-dim float vectors with
+      # m=32.
+      POSTGRES_INITDB_ARGS: ""
+    command:
+      - postgres
+      - -c
+      - maintenance_work_mem=4GB
+      - -c
+      - max_parallel_maintenance_workers=4
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./mempalace/init_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
