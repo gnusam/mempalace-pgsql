@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY pyproject.toml requirements.txt ./
+COPY pyproject.toml ./
 COPY mempalace/ ./mempalace/
 
 RUN python3.12 -m venv /opt/venv
