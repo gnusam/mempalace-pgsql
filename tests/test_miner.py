@@ -6,7 +6,8 @@ from pathlib import Path
 import yaml
 
 from mempalace.db import PalaceDB
-from mempalace.miner import mine, scan_project
+from mempalace import miner
+from mempalace.miner import mine, scan_project, process_file
 
 
 DATABASE_URL = os.environ.get(
@@ -212,5 +213,120 @@ def test_scan_project_skip_dirs_still_apply_without_override():
         write_file(project_root / "main.py", "print('main')\n" * 20)
 
         assert scanned_files(project_root, respect_gitignore=False) == ["main.py"]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+# ─── Anti-noise filters (minification, symlink skip, file-size ceiling) ──
+
+
+def test_scan_project_skips_minified_bundles_by_name():
+    """Filename patterns like *.min.js, *-bundle.js, *.umd.js are dropped."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+
+        write_file(project_root / "app.js", "console.log('hello')\n" * 20)
+        write_file(project_root / "vendor.min.js", "var a=1;" * 50)
+        write_file(project_root / "style.min.css", "body{margin:0}" * 50)
+        write_file(project_root / "swagger-ui-bundle.js", "var b=2;" * 50)
+        write_file(project_root / "framework.umd.js", "var c=3;" * 50)
+
+        assert scanned_files(project_root) == ["app.js"]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_scan_project_skips_symlinks():
+    """Symlinks point anywhere; refuse to follow them at scan time."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+        real = project_root / "real.py"
+        write_file(real, "print('real')\n" * 20)
+        os.symlink(real, project_root / "linked.py")
+
+        assert scanned_files(project_root) == ["real.py"]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_scan_project_skips_oversized_files(monkeypatch):
+    """Files exceeding MAX_FILE_SIZE are dropped before being opened."""
+    monkeypatch.setattr(miner, "MAX_FILE_SIZE", 100)  # 100 bytes cap
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+        write_file(project_root / "small.py", "x = 1\n")  # well under 100 bytes
+        write_file(project_root / "big.py", "y = 2\n" * 50)  # ~300 bytes, over cap
+
+        assert scanned_files(project_root) == ["small.py"]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_scan_project_skips_new_lockfiles_by_name():
+    """yarn.lock, composer.lock, etc are added to the skip list."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+
+        write_file(project_root / "app.py", "print('hello')\n" * 20)
+        write_file(project_root / "yarn.lock", "lock content\n" * 20)
+        write_file(project_root / "composer.lock", "lock content\n" * 20)
+        write_file(project_root / "Cargo.lock", "lock content\n" * 20)
+        write_file(project_root / "poetry.lock", "lock content\n" * 20)
+        write_file(project_root / "pnpm-lock.yaml", "lock content\n" * 20)
+
+        assert scanned_files(project_root) == ["app.py"]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_process_file_skips_machine_generated_long_lines():
+    """Files with average line length > MAX_AVG_LINE_LENGTH are dropped."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+        minified = project_root / "blob.json"
+        # One 2000-char line → avg line length 2000, well over the 400 cap
+        write_file(minified, "x" * 2000)
+
+        rooms = [{"name": "general", "description": "general", "keywords": []}]
+        count, room = process_file(
+            filepath=minified,
+            project_path=project_root,
+            db=None,
+            wing="test",
+            rooms=rooms,
+            agent="test",
+            dry_run=True,
+        )
+        assert count == 0
+        assert room is None
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_process_file_accepts_normal_line_lengths():
+    """Sanity check: ordinary multi-line files still pass the line-length gate."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+        normal = project_root / "code.py"
+        write_file(normal, "def hello():\n    return 'world'\n" * 40)
+
+        rooms = [{"name": "general", "description": "general", "keywords": []}]
+        count, room = process_file(
+            filepath=normal,
+            project_path=project_root,
+            db=None,
+            wing="test",
+            rooms=rooms,
+            agent="test",
+            dry_run=True,
+        )
+        assert count > 0
+        assert room == "general"
     finally:
         shutil.rmtree(tmpdir)

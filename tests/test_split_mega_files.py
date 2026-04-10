@@ -46,3 +46,18 @@ def test_extract_people_detects_names_from_content(monkeypatch):
     monkeypatch.setattr(smf, "KNOWN_PEOPLE", ["Alice", "Ben"])
     people = smf.extract_people(["> Alice reviewed the change with Ben\n"])
     assert people == ["Alice", "Ben"]
+
+
+def test_split_file_skips_oversized_file(monkeypatch, tmp_path, capsys):
+    """split_file() refuses to read files larger than MAX_SPLIT_FILE_SIZE."""
+    # Lower the ceiling so we can exercise the guard on a tiny file.
+    monkeypatch.setattr(smf, "MAX_SPLIT_FILE_SIZE", 10)
+    oversized = tmp_path / "huge.txt"
+    oversized.write_text("x" * 200, encoding="utf-8")  # 200 bytes > 10-byte cap
+
+    result = smf.split_file(str(oversized), output_dir=str(tmp_path))
+
+    assert result == []
+    captured = capsys.readouterr().out
+    assert "SKIP" in captured
+    assert "exceeds" in captured

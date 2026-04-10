@@ -1,7 +1,10 @@
 import os
 import tempfile
 import shutil
-from mempalace.convo_miner import mine_convos
+from pathlib import Path
+
+from mempalace import convo_miner
+from mempalace.convo_miner import mine_convos, scan_convos
 from mempalace.db import PalaceDB
 
 
@@ -33,3 +36,35 @@ def test_convo_mining():
     cur.execute("DELETE FROM drawers WHERE wing = 'test_convo_mining'")
     db.close()
     shutil.rmtree(tmpdir)
+
+
+def test_scan_convos_skips_symlinks():
+    """Symlinks in the convo source tree are refused at scan time."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        root = Path(tmpdir)
+        real = root / "session.txt"
+        real.write_text("> hello\nworld\n", encoding="utf-8")
+        os.symlink(real, root / "linked.txt")
+
+        files = [p.name for p in scan_convos(str(root))]
+        assert "session.txt" in files
+        assert "linked.txt" not in files
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_scan_convos_skips_oversized_files(monkeypatch):
+    """Convo files exceeding MAX_FILE_SIZE are dropped before open()."""
+    monkeypatch.setattr(convo_miner, "MAX_FILE_SIZE", 50)
+    tmpdir = tempfile.mkdtemp()
+    try:
+        root = Path(tmpdir)
+        (root / "small.txt").write_text("> q\na\n", encoding="utf-8")  # ~7 bytes
+        (root / "big.txt").write_text("> q\n" + "x" * 200 + "\n", encoding="utf-8")  # >50
+
+        files = [p.name for p in scan_convos(str(root))]
+        assert "small.txt" in files
+        assert "big.txt" not in files
+    finally:
+        shutil.rmtree(tmpdir)
