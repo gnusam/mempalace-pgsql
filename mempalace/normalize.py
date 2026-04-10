@@ -20,6 +20,12 @@ from pathlib import Path
 from typing import Optional
 
 
+# Hard ceiling on the size of a single file that normalize() will slurp
+# into memory. Exposed as a module constant so tests can monkey-patch it.
+# Ported from upstream 0720fb8 (PR #399).
+MAX_NORMALIZE_FILE_SIZE = 500 * 1024 * 1024  # 500 MB
+
+
 def normalize(filepath: str) -> str:
     """
     Load a file and normalize to transcript format if it's a chat export.
@@ -30,7 +36,7 @@ def normalize(filepath: str) -> str:
         # memory. Ported from upstream 0720fb8 (PR #399, fixes
         # milla-jovovich/mempalace#396), by @bensig.
         file_size = os.path.getsize(filepath)
-        if file_size > 500 * 1024 * 1024:  # 500 MB
+        if file_size > MAX_NORMALIZE_FILE_SIZE:
             raise IOError(f"File too large ({file_size // (1024 * 1024)} MB): {filepath}")
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()

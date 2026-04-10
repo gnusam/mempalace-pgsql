@@ -31,6 +31,11 @@ from pathlib import Path
 HOME = Path.home()
 LUMI_DIR = Path(os.environ.get("MEMPALACE_SOURCE_DIR", str(HOME / "Desktop/transcripts")))
 
+# Hard ceiling on the size of a single file that split_mega_files will read
+# into memory. Exposed as a module constant so tests can monkey-patch it.
+# Ported from upstream 0720fb8 (PR #399).
+MAX_SPLIT_FILE_SIZE = 500 * 1024 * 1024  # 500 MB
+
 # People we know about (for name detection in content)
 # Loaded from ~/.mempalace/known_names.json if it exists, otherwise generic fallback.
 _KNOWN_NAMES_PATH = HOME / ".mempalace" / "known_names.json"
@@ -185,9 +190,8 @@ def split_file(filepath, output_dir, dry_run=False):
     # Safety limit: skip pathologically large files that would OOM on a
     # full read. Ported from upstream 0720fb8 (PR #399, fixes
     # milla-jovovich/mempalace#396), by @bensig.
-    max_size = 500 * 1024 * 1024  # 500 MB
-    if path.stat().st_size > max_size:
-        print(f"  SKIP: {path.name} exceeds {max_size // (1024 * 1024)} MB limit")
+    if path.stat().st_size > MAX_SPLIT_FILE_SIZE:
+        print(f"  SKIP: {path.name} exceeds {MAX_SPLIT_FILE_SIZE // (1024 * 1024)} MB limit")
         return []
     lines = path.read_text(errors="replace").splitlines(keepends=True)
 
@@ -273,10 +277,9 @@ def main():
         files = sorted(src_dir.glob("*.txt"))
 
     mega_files = []
-    max_scan_size = 500 * 1024 * 1024  # 500 MB — same safety limit as split_file
     for f in files:
-        if f.stat().st_size > max_scan_size:
-            print(f"  SKIP: {f.name} exceeds {max_scan_size // (1024 * 1024)} MB limit")
+        if f.stat().st_size > MAX_SPLIT_FILE_SIZE:
+            print(f"  SKIP: {f.name} exceeds {MAX_SPLIT_FILE_SIZE // (1024 * 1024)} MB limit")
             continue
         lines = f.read_text(errors="replace").splitlines(keepends=True)
         boundaries = find_session_boundaries(lines)
