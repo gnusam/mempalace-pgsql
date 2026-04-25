@@ -159,6 +159,13 @@ def tool_get_taxonomy():
 
 
 def tool_search(query: str, limit: int = 5, wing: str = None, room: str = None):
+    # LLM agents tend to fill every optional parameter with "" rather than
+    # omitting it. Treat empty/whitespace-only wing/room as no filter so the
+    # search isn't silently scoped to a non-existent empty wing/room.
+    if isinstance(wing, str) and not wing.strip():
+        wing = None
+    if isinstance(room, str) and not room.strip():
+        room = None
     return search_memories(
         query,
         palace_path=_config.palace_path,

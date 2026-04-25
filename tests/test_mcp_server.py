@@ -138,6 +138,32 @@ def test_tools_call_missing_arguments_key_still_works(monkeypatch):
     assert calls == [{}]
 
 
+# ── tool_search: empty/whitespace wing/room treated as no filter (upstream #1097)
+
+
+def test_tool_search_empty_wing_room_means_no_filter(monkeypatch):
+    """LLMs often fill optional params with "" instead of omitting them.
+
+    Empty or whitespace-only wing/room must be normalized to None before
+    reaching search_memories — otherwise the search gets silently scoped
+    to a non-existent empty filter and returns 0 results.
+    """
+    captured = {}
+
+    def fake_search_memories(query, palace_path=None, wing=None, room=None, n_results=5):
+        captured["wing"] = wing
+        captured["room"] = room
+        return {"results": []}
+
+    monkeypatch.setattr(mcp_server, "search_memories", fake_search_memories)
+
+    mcp_server.tool_search("hello", wing="", room="   ")
+    assert captured == {"wing": None, "room": None}
+
+    mcp_server.tool_search("hello", wing="wing_code", room="")
+    assert captured == {"wing": "wing_code", "room": None}
+
+
 def test_tools_call_unknown_tool_returns_error():
     """Unknown tool name yields a JSON-RPC error, not a crash."""
     request = {
