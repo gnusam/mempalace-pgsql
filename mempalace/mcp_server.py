@@ -69,6 +69,20 @@ def _no_palace():
     }
 
 
+def _normalize_optional_filter(value):
+    """Treat empty/whitespace-only strings as no filter.
+
+    LLM agents tend to fill every optional parameter with "" rather than
+    omitting it. Without normalization a wing/room filter of "   " is
+    truthy and reaches the DB layer as a literal filter, scoping results
+    to a non-existent empty string and returning zero rows. Returns the
+    stripped value when it has content, ``None`` otherwise.
+    """
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value.strip() if isinstance(value, str) else value
+
+
 # ==================== READ TOOLS ====================
 
 
@@ -131,6 +145,7 @@ def tool_list_wings():
 
 
 def tool_list_rooms(wing: str = None):
+    wing = _normalize_optional_filter(wing)
     db = _get_db()
     cur = db.conn().cursor()
     if wing:
@@ -159,13 +174,8 @@ def tool_get_taxonomy():
 
 
 def tool_search(query: str, limit: int = 5, wing: str = None, room: str = None):
-    # LLM agents tend to fill every optional parameter with "" rather than
-    # omitting it. Treat empty/whitespace-only wing/room as no filter so the
-    # search isn't silently scoped to a non-existent empty wing/room.
-    if isinstance(wing, str) and not wing.strip():
-        wing = None
-    if isinstance(room, str) and not room.strip():
-        room = None
+    wing = _normalize_optional_filter(wing)
+    room = _normalize_optional_filter(room)
     return search_memories(
         query,
         palace_path=_config.palace_path,
@@ -221,7 +231,7 @@ def tool_traverse_graph(start_room: str, max_hops: int = 2):
 
 def tool_find_tunnels(wing_a: str = None, wing_b: str = None):
     """Find rooms that bridge two wings — the hallways connecting domains."""
-    return find_tunnels(wing_a, wing_b)
+    return find_tunnels(_normalize_optional_filter(wing_a), _normalize_optional_filter(wing_b))
 
 
 def tool_graph_stats():
@@ -329,9 +339,8 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
     agent's default ``wing_<agent_name>`` wing — used by hooks to scope
     entries to the project the session belongs to.
     """
-    if isinstance(wing, str) and wing.strip():
-        wing = wing.strip()
-    else:
+    wing = _normalize_optional_filter(wing)
+    if not wing:
         wing = f"wing_{agent_name.lower().replace(' ', '_')}"
     db = _get_db()
 
@@ -380,12 +389,10 @@ def tool_diary_read(agent_name: str, last_n: int = 10, wing: str = ""):
     PR #659 review).
     """
     db = _get_db()
-    use_wing_filter = isinstance(wing, str) and wing.strip()
-    if use_wing_filter:
-        wing = wing.strip()
+    wing = _normalize_optional_filter(wing)
 
     try:
-        if use_wing_filter:
+        if wing:
             where = {
                 "$and": [
                     {"wing": wing},

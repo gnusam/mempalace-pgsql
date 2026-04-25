@@ -138,6 +138,31 @@ def test_tools_call_missing_arguments_key_still_works(monkeypatch):
     assert calls == [{}]
 
 
+# ── _normalize_optional_filter: empty/whitespace = no filter (upstream #1097
+#    pattern, factored out across every LLM-callable tool)
+
+
+def test_normalize_optional_filter_returns_none_for_empty_strings():
+    from mempalace.mcp_server import _normalize_optional_filter
+
+    assert _normalize_optional_filter("") is None
+    assert _normalize_optional_filter("   ") is None
+    assert _normalize_optional_filter("\t\n") is None
+
+
+def test_normalize_optional_filter_strips_then_returns_value():
+    from mempalace.mcp_server import _normalize_optional_filter
+
+    assert _normalize_optional_filter("wing_code") == "wing_code"
+    assert _normalize_optional_filter("  wing_code  ") == "wing_code"
+
+
+def test_normalize_optional_filter_passes_none_through():
+    from mempalace.mcp_server import _normalize_optional_filter
+
+    assert _normalize_optional_filter(None) is None
+
+
 # ── tool_search: empty/whitespace wing/room treated as no filter (upstream #1097)
 
 
@@ -238,6 +263,82 @@ def test_diary_read_whitespace_wing_spans_all_wings_for_agent(monkeypatch):
     where = fake.queries[-1]
     conds = where["$and"]
     assert all("wing" not in c for c in conds)
+
+
+# ── tool_list_rooms / tool_find_tunnels: same empty-filter normalization
+
+
+def test_tool_list_rooms_empty_wing_lists_all_rooms(monkeypatch):
+    """tool_list_rooms with wing="   " must hit the unfiltered branch
+    (counts rooms across all wings) instead of running
+    `WHERE wing = '   '` and returning nothing."""
+    captured = {"sql": None, "params": None}
+
+    class _FakeCursor:
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = params
+
+        def fetchall(self):
+            return []
+
+    class _FakeConn:
+        def cursor(self):
+            return _FakeCursor()
+
+    class _FakeDB:
+        def conn(self):
+            return _FakeConn()
+
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: _FakeDB())
+
+    result = mcp_server.tool_list_rooms(wing="   ")
+    assert result["wing"] == "all"
+    assert "WHERE wing" not in captured["sql"]
+    assert captured["params"] is None
+
+
+def test_tool_list_rooms_with_real_wing_filters(monkeypatch):
+    captured = {"sql": None, "params": None}
+
+    class _FakeCursor:
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = params
+
+        def fetchall(self):
+            return []
+
+    class _FakeConn:
+        def cursor(self):
+            return _FakeCursor()
+
+    class _FakeDB:
+        def conn(self):
+            return _FakeConn()
+
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: _FakeDB())
+
+    result = mcp_server.tool_list_rooms(wing="  wing_code  ")
+    assert result["wing"] == "wing_code"  # stripped
+    assert "WHERE wing" in captured["sql"]
+    assert captured["params"] == ("wing_code",)
+
+
+def test_tool_find_tunnels_normalizes_both_wings(monkeypatch):
+    captured = {"args": None}
+
+    def fake_find_tunnels(a, b):
+        captured["args"] = (a, b)
+        return {"tunnels": []}
+
+    monkeypatch.setattr(mcp_server, "find_tunnels", fake_find_tunnels)
+
+    mcp_server.tool_find_tunnels(wing_a="", wing_b="   ")
+    assert captured["args"] == (None, None)
+
+    mcp_server.tool_find_tunnels(wing_a=" wing_code ", wing_b="wing_user")
+    assert captured["args"] == ("wing_code", "wing_user")
 
 
 def test_tools_call_unknown_tool_returns_error():
