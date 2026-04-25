@@ -133,8 +133,10 @@ def cmd_split(args):
     from .split_mega_files import main as split_main
     import sys
 
-    # Rebuild argv for split_mega_files argparse
-    argv = ["--source", args.dir]
+    # Rebuild argv for split_mega_files argparse. Expand ~ and resolve to an
+    # absolute path so split_mega_files sees a real path (Path("~/foo") does
+    # not expand tilde on its own).
+    argv = ["--source", str(Path(args.dir).expanduser().resolve())]
     if args.output_dir:
         argv += ["--output-dir", args.output_dir]
     if args.dry_run:
