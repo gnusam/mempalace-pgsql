@@ -164,6 +164,50 @@ class PalaceDB:
             self.conn().rollback()
             raise
 
+    def register_empty_file(self, source_file, wing, agent="mempalace"):
+        """Insert a no-embedding sentinel so file_already_mined() returns True
+        for files that produce zero chunks (port of upstream 87e8baf, PR #732).
+
+        Without this, files that normalize to nothing or produce zero chunks
+        are re-read on every mine run — file_already_mined() requires a row
+        with a matching source_file AND a stored source_mtime, but 0-chunk
+        early exits never write one.
+
+        Stores the file's mtime in metadata exactly as the regular mining
+        path does. The embedding column is left NULL so the sentinel doesn't
+        cost an embedding pass and is invisible to vector search.
+        """
+        try:
+            mtime = os.path.getmtime(source_file)
+        except OSError:
+            return None
+        sentinel_id = f"_reg_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
+        meta = json.dumps({"source_mtime": mtime, "ingest_mode": "registry"})
+        cur = self.conn().cursor()
+        try:
+            cur.execute(
+                """INSERT INTO drawers (id, wing, room, content, embedding,
+                       source_file, chunk_index, added_by, filed_at, metadata)
+                   VALUES (%s, %s, %s, %s, NULL, %s, 0, %s, %s, %s)
+                   ON CONFLICT (id) DO UPDATE SET
+                     metadata    = EXCLUDED.metadata,
+                     filed_at    = EXCLUDED.filed_at""",
+                (
+                    sentinel_id,
+                    wing,
+                    "_registry",
+                    f"[registry] {source_file}",
+                    source_file,
+                    agent,
+                    datetime.now(),
+                    meta,
+                ),
+            )
+            return sentinel_id
+        except Exception:
+            self.conn().rollback()
+            raise
+
     def file_already_mined(self, source_file):
         """Fast check: has this file been filed before AND is unchanged?
 

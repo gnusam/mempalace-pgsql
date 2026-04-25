@@ -42,6 +42,7 @@ SKIP_DIRS = {
 }
 
 MIN_CHUNK_SIZE = 30
+CHUNK_SIZE = 800  # chars per drawer — align with miner.py
 
 # Hard ceiling on per-file size at scan time. Ported from upstream 1d19dfc
 # (PR #252) — protects against OOM on pathological transcript files.
@@ -68,7 +69,12 @@ def chunk_exchanges(content: str) -> list:
 
 
 def _chunk_by_exchange(lines: list) -> list:
-    """One user turn (>) + the AI response that follows = one chunk."""
+    """One user turn (>) + the AI response that follows = one or more chunks.
+
+    The full AI response is preserved verbatim. When the combined
+    user-turn + response exceeds CHUNK_SIZE the response is split across
+    consecutive drawers so nothing is silently discarded.
+    """
     chunks = []
     i = 0
 
@@ -87,10 +93,20 @@ def _chunk_by_exchange(lines: list) -> list:
                     ai_lines.append(next_line.strip())
                 i += 1
 
-            ai_response = " ".join(ai_lines[:8])
+            ai_response = " ".join(ai_lines)
             content = f"{user_turn}\n{ai_response}" if ai_response else user_turn
 
-            if len(content.strip()) > MIN_CHUNK_SIZE:
+            if len(content) > CHUNK_SIZE:
+                first_part = content[:CHUNK_SIZE]
+                if len(first_part.strip()) > MIN_CHUNK_SIZE:
+                    chunks.append({"content": first_part, "chunk_index": len(chunks)})
+                remainder = content[CHUNK_SIZE:]
+                while remainder:
+                    part = remainder[:CHUNK_SIZE]
+                    remainder = remainder[CHUNK_SIZE:]
+                    if len(part.strip()) > MIN_CHUNK_SIZE:
+                        chunks.append({"content": part, "chunk_index": len(chunks)})
+            elif len(content.strip()) > MIN_CHUNK_SIZE:
                 chunks.append(
                     {
                         "content": content,
@@ -308,9 +324,13 @@ def mine_convos(
         try:
             content = normalize(str(filepath))
         except (OSError, ValueError):
+            if not dry_run:
+                db.register_empty_file(source_file, wing, agent)
             continue
 
         if not content or len(content.strip()) < MIN_CHUNK_SIZE:
+            if not dry_run:
+                db.register_empty_file(source_file, wing, agent)
             continue
 
         # Chunk — either exchange pairs or general extraction
@@ -323,6 +343,8 @@ def mine_convos(
             chunks = chunk_exchanges(content)
 
         if not chunks:
+            if not dry_run:
+                db.register_empty_file(source_file, wing, agent)
             continue
 
         # Detect room from content (general mode uses memory_type instead)
