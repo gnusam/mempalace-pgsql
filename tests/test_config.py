@@ -25,6 +25,39 @@ def test_env_override():
     del os.environ["MEMPALACE_PALACE_PATH"]
 
 
+def test_env_path_expanduser():
+    os.environ["MEMPALACE_PALACE_PATH"] = "~/mempalace-test"
+    try:
+        cfg = MempalaceConfig(config_dir=tempfile.mkdtemp())
+        assert "~" not in cfg.palace_path
+        assert cfg.palace_path.endswith("mempalace-test")
+        assert cfg.palace_path == os.path.expanduser("~/mempalace-test")
+    finally:
+        del os.environ["MEMPALACE_PALACE_PATH"]
+
+
+def test_env_path_abspath_collapses_traversal():
+    os.environ["MEMPALACE_PALACE_PATH"] = "/tmp/palace/../mempalace-test"
+    try:
+        cfg = MempalaceConfig(config_dir=tempfile.mkdtemp())
+        assert ".." not in cfg.palace_path
+        assert cfg.palace_path == "/tmp/mempalace-test"
+    finally:
+        del os.environ["MEMPALACE_PALACE_PATH"]
+
+
+def test_env_path_legacy_alias_normalized():
+    os.environ.pop("MEMPALACE_PALACE_PATH", None)
+    os.environ["MEMPAL_PALACE_PATH"] = "~/legacy-alias/../mempalace-test"
+    try:
+        cfg = MempalaceConfig(config_dir=tempfile.mkdtemp())
+        assert "~" not in cfg.palace_path
+        assert ".." not in cfg.palace_path
+        assert cfg.palace_path == os.path.expanduser("~/mempalace-test")
+    finally:
+        del os.environ["MEMPAL_PALACE_PATH"]
+
+
 def test_init():
     tmpdir = tempfile.mkdtemp()
     cfg = MempalaceConfig(config_dir=tmpdir)
