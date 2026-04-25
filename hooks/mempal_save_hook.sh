@@ -124,8 +124,25 @@ fi
 
 SINCE_LAST=$((EXCHANGE_COUNT - LAST_SAVE))
 
+# Derive a per-project wing name from the transcript path so the AI files
+# diary entries under the project they're working in instead of a single
+# wing_<agent> bucket. Claude Code stores transcripts under
+# ~/.claude/projects/-encoded-project-folder/<session>.jsonl — the final
+# dash-separated token is a stable handle for the project.  Adapted from
+# upstream d158375 (PR #1145, the Linux/Cross-platform variant).
+PROJECT_WING="wing_sessions"
+if [ -n "$TRANSCRIPT_PATH" ]; then
+    PROJECT_DIR=$(echo "$TRANSCRIPT_PATH" | sed -n 's|.*/.claude/projects/\([^/]*\)/.*|\1|p')
+    if [ -n "$PROJECT_DIR" ]; then
+        PROJECT_TOKEN=$(echo "$PROJECT_DIR" | awk -F- '{print $NF}' | tr -cd 'a-zA-Z0-9_-')
+        if [ -n "$PROJECT_TOKEN" ]; then
+            PROJECT_WING="wing_${PROJECT_TOKEN}"
+        fi
+    fi
+fi
+
 # Log for debugging (check ~/.mempalace/hook_state/hook.log)
-echo "[$(date '+%H:%M:%S')] Session $SESSION_ID: $EXCHANGE_COUNT exchanges, $SINCE_LAST since last save" >> "$STATE_DIR/hook.log"
+echo "[$(date '+%H:%M:%S')] Session $SESSION_ID: $EXCHANGE_COUNT exchanges, $SINCE_LAST since last save, wing=$PROJECT_WING" >> "$STATE_DIR/hook.log"
 
 # Time to save?
 if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
@@ -141,14 +158,12 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
         python3 -m mempalace mine "$MEMPAL_DIR" >> "$STATE_DIR/hook.log" 2>&1 &
     fi
 
-    # Block the AI and tell it to save
-    # The "reason" becomes a system message the AI sees and acts on
-    cat << 'HOOKJSON'
-{
-  "decision": "block",
-  "reason": "AUTO-SAVE checkpoint. Save key topics, decisions, quotes, and code from this session to your memory system. Organize into appropriate categories. Use verbatim quotes where possible. Continue conversation after saving."
-}
-HOOKJSON
+    # Block the AI and tell it to save. The "reason" becomes a system
+    # message the AI sees and acts on; the wing= hint tells it which
+    # project wing to file the entry in via mempalace_diary_write so
+    # per-project diary search works.
+    REASON_TEXT="AUTO-SAVE checkpoint. Save key topics, decisions, quotes, and code from this session to your memory system. Organize into appropriate categories. Use verbatim quotes where possible. When calling mempalace_diary_write, set wing=\"${PROJECT_WING}\". Continue conversation after saving."
+    REASON_TEXT="$REASON_TEXT" python3 -c 'import json, os; print(json.dumps({"decision": "block", "reason": os.environ["REASON_TEXT"]}))'
 else
     # Not time yet — let the AI stop normally
     echo "{}"

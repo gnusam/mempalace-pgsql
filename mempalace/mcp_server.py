@@ -317,15 +317,22 @@ def tool_kg_stats():
 # ==================== AGENT DIARY ====================
 
 
-def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
+def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: str = ""):
     """
-    Write a diary entry for this agent. Each agent gets its own wing
-    with a diary room. Entries are timestamped and accumulate over time.
+    Write a diary entry for this agent. Entries are timestamped and
+    accumulate over time in a diary room.
 
     This is the agent's personal journal — observations, thoughts,
     what it worked on, what it noticed, what it thinks matters.
+
+    When ``wing`` is provided, the entry is filed there instead of the
+    agent's default ``wing_<agent_name>`` wing — used by hooks to scope
+    entries to the project the session belongs to.
     """
-    wing = f"wing_{agent_name.lower().replace(' ', '_')}"
+    if isinstance(wing, str) and wing.strip():
+        wing = wing.strip()
+    else:
+        wing = f"wing_{agent_name.lower().replace(' ', '_')}"
     db = _get_db()
 
     try:
@@ -357,19 +364,45 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
         return {"success": False, "error": str(e)}
 
 
-def tool_diary_read(agent_name: str, last_n: int = 10):
+def tool_diary_read(agent_name: str, last_n: int = 10, wing: str = ""):
     """
     Read an agent's recent diary entries. Returns the last N entries
     in chronological order — the agent's personal journal.
+
+    When ``wing`` is provided, reads from that wing instead of the
+    agent's default ``wing_<agent_name>``. When ``wing`` is empty or
+    whitespace, reads diary entries written by this agent across every
+    wing they have written to (matches the LLM-friendly empty-string
+    pattern from upstream PR #1097).
+
+    The agent filter is always applied so callers sharing a project wing
+    can only see their own diary entries (security note from upstream
+    PR #659 review).
     """
-    wing = f"wing_{agent_name.lower().replace(' ', '_')}"
     db = _get_db()
+    use_wing_filter = isinstance(wing, str) and wing.strip()
+    if use_wing_filter:
+        wing = wing.strip()
 
     try:
-        results = db.get_drawers(
-            where={"$and": [{"wing": wing}, {"room": "diary"}]},
-            limit=10000,
-        )
+        if use_wing_filter:
+            where = {
+                "$and": [
+                    {"wing": wing},
+                    {"room": "diary"},
+                    {"added_by": agent_name},
+                ]
+            }
+        else:
+            # Empty/whitespace wing → span all wings this agent has
+            # written diary entries to.
+            where = {
+                "$and": [
+                    {"room": "diary"},
+                    {"added_by": agent_name},
+                ]
+            }
+        results = db.get_drawers(where=where, limit=10000)
 
         if not results["ids"]:
             return {"agent": agent_name, "entries": [], "message": "No diary entries yet."}
@@ -624,6 +657,10 @@ TOOLS = {
                     "type": "string",
                     "description": "Topic tag (optional, default: general)",
                 },
+                "wing": {
+                    "type": "string",
+                    "description": "Target wing for this entry (optional). When omitted, uses wing_<agent_name>. Hooks set this to the project wing so per-project diary search works.",
+                },
             },
             "required": ["agent_name", "entry"],
         },
@@ -641,6 +678,10 @@ TOOLS = {
                 "last_n": {
                     "type": "integer",
                     "description": "Number of recent entries to read (default: 10)",
+                },
+                "wing": {
+                    "type": "string",
+                    "description": "Wing to read diary entries from (optional). When omitted, reads entries by this agent across every wing they have written to.",
                 },
             },
             "required": ["agent_name"],

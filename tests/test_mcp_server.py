@@ -164,6 +164,82 @@ def test_tool_search_empty_wing_room_means_no_filter(monkeypatch):
     assert captured == {"wing": "wing_code", "room": None}
 
 
+# ── tool_diary_write / tool_diary_read: optional wing param (upstream #659/#1145)
+
+
+class _FakeDB:
+    """Minimal stand-in for PalaceDB capturing add_drawer / get_drawers calls."""
+
+    def __init__(self):
+        self.adds = []
+        self.queries = []
+        self.fake_results = {"ids": [], "documents": [], "metadatas": []}
+
+    def add_drawer(self, **kwargs):
+        self.adds.append(kwargs)
+        return f"drawer_{len(self.adds)}"
+
+    def get_drawers(self, where=None, limit=None, offset=0, include=None):
+        self.queries.append(where)
+        return self.fake_results
+
+
+def test_diary_write_uses_provided_wing(monkeypatch):
+    fake = _FakeDB()
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: fake)
+    mcp_server.tool_diary_write(agent_name="claude", entry="hello", wing="wing_mempalace")
+    assert fake.adds[-1]["wing"] == "wing_mempalace"
+
+
+def test_diary_write_falls_back_when_wing_omitted(monkeypatch):
+    fake = _FakeDB()
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: fake)
+    mcp_server.tool_diary_write(agent_name="Claude", entry="hello")
+    assert fake.adds[-1]["wing"] == "wing_claude"
+
+
+def test_diary_write_falls_back_on_whitespace_wing(monkeypatch):
+    fake = _FakeDB()
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: fake)
+    mcp_server.tool_diary_write(agent_name="Claude", entry="hello", wing="   ")
+    assert fake.adds[-1]["wing"] == "wing_claude"
+
+
+def test_diary_read_filters_by_provided_wing_and_agent(monkeypatch):
+    fake = _FakeDB()
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: fake)
+    mcp_server.tool_diary_read(agent_name="claude", wing="wing_mempalace")
+    where = fake.queries[-1]
+    conds = where["$and"]
+    # wing + room + added_by clauses
+    assert {"wing": "wing_mempalace"} in conds
+    assert {"room": "diary"} in conds
+    assert {"added_by": "claude"} in conds
+
+
+def test_diary_read_empty_wing_spans_all_wings_for_agent(monkeypatch):
+    """Upstream PR #1145 (1fd16da): wing='' must span every wing this agent
+    has written diary entries to — no wing filter, only room + agent."""
+    fake = _FakeDB()
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: fake)
+    mcp_server.tool_diary_read(agent_name="claude", wing="")
+    where = fake.queries[-1]
+    conds = where["$and"]
+    # No wing clause when wing is empty
+    assert all("wing" not in c for c in conds)
+    assert {"room": "diary"} in conds
+    assert {"added_by": "claude"} in conds
+
+
+def test_diary_read_whitespace_wing_spans_all_wings_for_agent(monkeypatch):
+    fake = _FakeDB()
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: fake)
+    mcp_server.tool_diary_read(agent_name="claude", wing="   ")
+    where = fake.queries[-1]
+    conds = where["$and"]
+    assert all("wing" not in c for c in conds)
+
+
 def test_tools_call_unknown_tool_returns_error():
     """Unknown tool name yields a JSON-RPC error, not a crash."""
     request = {
