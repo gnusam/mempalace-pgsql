@@ -461,16 +461,16 @@ def process_file(
     # Skip if already filed
     source_file = str(filepath)
     if not dry_run and file_already_mined(db, source_file):
-        return 0, None
+        return 0, "general"
 
     try:
         content = filepath.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return 0, None
+        return 0, "general"
 
     content = content.strip()
     if len(content) < MIN_CHUNK_SIZE:
-        return 0, None
+        return 0, "general"
 
     # Reject minified / machine-generated content by average line length.
     # Filename-based skip (SKIP_FILENAME_PATTERNS) catches the common cases;
@@ -478,7 +478,7 @@ def process_file(
     # (e.g. Symfony Intl CLDR data, which is one huge JSON object per file).
     line_count = content.count("\n") + 1
     if len(content) / line_count > MAX_AVG_LINE_LENGTH:
-        return 0, None
+        return 0, "general"
 
     room = detect_room(filepath, content, rooms, project_path)
     chunks = chunk_text(content, source_file)

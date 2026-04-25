@@ -303,7 +303,9 @@ def test_process_file_skips_machine_generated_long_lines():
             dry_run=True,
         )
         assert count == 0
-        assert room is None
+        # Upstream 091c2fe (PR #687): early-exit paths return "general" so
+        # the dry-run summary printer doesn't crash on a None dict key.
+        assert room == "general"
     finally:
         shutil.rmtree(tmpdir)
 
