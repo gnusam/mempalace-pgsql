@@ -10,8 +10,6 @@ migration (commit abbab4f) because it depended on ChromaDB / legacy KG
 APIs. This file is scoped narrower: no DB, no tool execution.
 """
 
-import pytest
-
 from mempalace import mcp_server
 from mempalace.mcp_server import SUPPORTED_PROTOCOL_VERSIONS, handle_request
 
