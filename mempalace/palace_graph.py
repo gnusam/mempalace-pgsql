@@ -10,8 +10,30 @@ Builds a navigable graph from the palace structure:
 No external graph DB needed — built from PostgreSQL metadata.
 """
 
+# PEP 604 (``str | None``) needs 3.10+ at runtime; CI still runs 3.9, so
+# defer annotation evaluation to keep the union syntax working there.
+from __future__ import annotations
+
+import logging
 from collections import defaultdict, Counter
 from .db import get_db
+
+logger = logging.getLogger("mempalace_graph")
+
+
+def _normalize_wing(wing: str | None) -> str | None:
+    """Normalize a wing name for consistent lookup.
+
+    Wings are stored with spaces and hyphens replaced by underscores
+    (see ``room_detector_local.derive_wing_name`` and
+    ``convo_miner._derive_wing``). Callers that pass the raw directory
+    name (``mempalace-public``) would silently miss against the
+    canonical form (``mempalace_public``); this helper aligns the
+    lookup key with the stored metadata.
+    """
+    if wing is None:
+        return None
+    return wing.lower().replace(" ", "_").replace("-", "_")
 
 
 def build_graph():
@@ -129,14 +151,17 @@ def traverse(start_room: str, max_hops: int = 2):
 def find_tunnels(wing_a: str = None, wing_b: str = None):
     nodes, edges = build_graph()
 
+    norm_a = _normalize_wing(wing_a)
+    norm_b = _normalize_wing(wing_b)
+
     tunnels = []
     for room, data in nodes.items():
         wings = data["wings"]
         if len(wings) < 2:
             continue
-        if wing_a and wing_a not in wings:
+        if norm_a and norm_a not in wings:
             continue
-        if wing_b and wing_b not in wings:
+        if norm_b and norm_b not in wings:
             continue
         tunnels.append(
             {
@@ -146,6 +171,15 @@ def find_tunnels(wing_a: str = None, wing_b: str = None):
                 "count": data["count"],
                 "recent": data["dates"][-1] if data["dates"] else "",
             }
+        )
+
+    if not tunnels and (wing_a or wing_b):
+        logger.warning(
+            "No tunnels found for wing filter(s): wing_a=%r (normalized=%r), wing_b=%r (normalized=%r)",
+            wing_a,
+            norm_a,
+            wing_b,
+            norm_b,
         )
 
     tunnels.sort(key=lambda x: -x["count"])
