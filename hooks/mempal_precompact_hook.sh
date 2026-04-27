@@ -41,31 +41,60 @@
 # to save everything. After the AI saves, compaction proceeds normally.
 #
 # === MEMPALACE CLI ===
-# This repo uses: mempalace mine <dir>
-# or:            mempalace mine <dir> --mode convos
-# Set MEMPAL_DIR below if you want the hook to auto-ingest before compaction.
-# Leave blank to rely on the AI's own save instructions.
+# The hook ALWAYS mines the active conversation transcript synchronously
+# before compaction (via `python3 -m mempalace mine <transcript-dir>
+# --mode convos`).  MEMPAL_DIR is an *additional*, optional target for
+# project files — it does not replace the conversation mine.
 
 STATE_DIR="$HOME/.mempalace/hook_state"
 mkdir -p "$STATE_DIR"
 
-# Optional: set to the directory you want auto-ingested before compaction.
-# Example: MEMPAL_DIR="$HOME/conversations"
-# Leave empty to skip auto-ingest (AI handles saving via the block reason).
+# Optional: project directory (code / notes / docs) to also mine before
+# compaction. Mined with `--mode projects`. The conversation transcript
+# is always mined regardless — this is purely additive.
+# Example: MEMPAL_DIR="$HOME/projects/my_app"
 MEMPAL_DIR=""
+
+# Validate transcript path — same shape check as mempal_save_hook.sh.
+is_valid_transcript_path() {
+    local path="$1"
+    [ -n "$path" ] || return 1
+    case "$path" in
+        *.json|*.jsonl) ;;
+        *) return 1 ;;
+    esac
+    case "/$path/" in
+        */../*) return 1 ;;
+    esac
+    return 0
+}
 
 # Read JSON input from stdin
 INPUT=$(cat)
 
 SESSION_ID=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id','unknown'))" 2>/dev/null)
+SESSION_ID=$(echo "$SESSION_ID" | tr -cd 'a-zA-Z0-9_-')
+[ -z "$SESSION_ID" ] && SESSION_ID="unknown"
+TRANSCRIPT_PATH=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('transcript_path',''))" 2>/dev/null)
+TRANSCRIPT_PATH="${TRANSCRIPT_PATH/#\~/$HOME}"
 
 echo "[$(date '+%H:%M:%S')] PRE-COMPACT triggered for session $SESSION_ID" >> "$STATE_DIR/hook.log"
 
-# Optional: run mempalace ingest synchronously so memories land before compaction
+# Run ingest synchronously so memories land before compaction. Two
+# independent targets — both run if both are set:
+#   1. TRANSCRIPT_PATH (from Claude Code) → parent dir, --mode convos
+#   2. MEMPAL_DIR → --mode projects
+# Adapted from upstream MemPalace eb4de04 (PR #1231 by @igorls).
+if is_valid_transcript_path "$TRANSCRIPT_PATH" && [ -f "$TRANSCRIPT_PATH" ]; then
+    python3 -m mempalace mine "$(dirname "$TRANSCRIPT_PATH")" --mode convos \
+        >> "$STATE_DIR/hook.log" 2>&1
+elif [ -n "$TRANSCRIPT_PATH" ]; then
+    echo "[$(date '+%H:%M:%S')] Skipping invalid transcript path: $TRANSCRIPT_PATH" \
+        >> "$STATE_DIR/hook.log"
+fi
 if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    REPO_DIR="$(dirname "$SCRIPT_DIR")"
-    python3 -m mempalace mine "$MEMPAL_DIR" >> "$STATE_DIR/hook.log" 2>&1
+    python3 -m mempalace mine "$MEMPAL_DIR" --mode projects \
+        >> "$STATE_DIR/hook.log" 2>&1
 fi
 
 # Always block — compaction = save everything

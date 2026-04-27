@@ -45,10 +45,10 @@
 # stop_hook_active=true so we let it through. No infinite loop.
 #
 # === MEMPALACE CLI ===
-# This repo uses: mempalace mine <dir>
-# or:            mempalace mine <dir> --mode convos
-# Set MEMPAL_DIR below if you want the hook to auto-ingest after blocking.
-# Leave blank to rely on the AI's own save instructions.
+# The hook ALWAYS mines the active conversation transcript automatically
+# (via `python3 -m mempalace mine <transcript-dir> --mode convos`).
+# MEMPAL_DIR is an *additional*, optional target for project files —
+# it does not replace the conversation mine.
 #
 # === CONFIGURATION ===
 
@@ -56,9 +56,10 @@ SAVE_INTERVAL=15  # Save every N human messages (adjust to taste)
 STATE_DIR="$HOME/.mempalace/hook_state"
 mkdir -p "$STATE_DIR"
 
-# Optional: set to the directory you want auto-ingested on each save trigger.
-# Example: MEMPAL_DIR="$HOME/conversations"
-# Leave empty to skip auto-ingest (AI handles saving via the block reason).
+# Optional: project directory (code / notes / docs) to also mine on each
+# save trigger. Mined with `--mode projects`. The conversation transcript
+# is always mined regardless — this is purely additive.
+# Example: MEMPAL_DIR="$HOME/projects/my_app"
 MEMPAL_DIR=""
 
 # Read JSON input from stdin
@@ -74,6 +75,26 @@ TRANSCRIPT_PATH=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(s
 
 # Expand ~ in path
 TRANSCRIPT_PATH="${TRANSCRIPT_PATH/#\~/$HOME}"
+
+# Validate that TRANSCRIPT_PATH looks like a transcript file:
+#   - non-empty
+#   - .jsonl or .json suffix
+#   - no traversal segments (.. components)
+# Defense-in-depth alongside the existing `[ -f ... ]` test below;
+# rejects obvious junk before we hand the path to `dirname` and the
+# miner.  Adapted from upstream MemPalace fe56797 (PR #1231 review).
+is_valid_transcript_path() {
+    local path="$1"
+    [ -n "$path" ] || return 1
+    case "$path" in
+        *.json|*.jsonl) ;;
+        *) return 1 ;;
+    esac
+    case "/$path/" in
+        */../*) return 1 ;;
+    esac
+    return 0
+}
 
 # If we're already in a save cycle, let the AI stop normally
 # This is the infinite-loop prevention: block once → AI saves → tries to stop again → we let it through
@@ -151,11 +172,27 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
 
     echo "[$(date '+%H:%M:%S')] TRIGGERING SAVE at exchange $EXCHANGE_COUNT" >> "$STATE_DIR/hook.log"
 
-    # Optional: run mempalace ingest in background if MEMPAL_DIR is set
+    # Auto-mine. Two independent targets — both run if both are set:
+    #   1. TRANSCRIPT_PATH (from Claude Code) → parent dir, --mode convos
+    #      (Claude Code session JSONL — must use the convo miner)
+    #   2. MEMPAL_DIR (user-configured project) → --mode projects
+    #      (code, notes, docs)
+    # MEMPAL_DIR is *additive*, not an override: a user with MEMPAL_DIR
+    # pointed at their project still gets the active conversation mined.
+    # Adapted from upstream MemPalace eb4de04 (PR #1231 by @igorls) —
+    # the previous behaviour silently skipped the transcript whenever
+    # MEMPAL_DIR was set, which was the most common configuration in the
+    # wild.
+    if is_valid_transcript_path "$TRANSCRIPT_PATH" && [ -f "$TRANSCRIPT_PATH" ]; then
+        python3 -m mempalace mine "$(dirname "$TRANSCRIPT_PATH")" --mode convos \
+            >> "$STATE_DIR/hook.log" 2>&1 &
+    elif [ -n "$TRANSCRIPT_PATH" ]; then
+        echo "[$(date '+%H:%M:%S')] Skipping invalid transcript path: $TRANSCRIPT_PATH" \
+            >> "$STATE_DIR/hook.log"
+    fi
     if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
-        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        REPO_DIR="$(dirname "$SCRIPT_DIR")"
-        python3 -m mempalace mine "$MEMPAL_DIR" >> "$STATE_DIR/hook.log" 2>&1 &
+        python3 -m mempalace mine "$MEMPAL_DIR" --mode projects \
+            >> "$STATE_DIR/hook.log" 2>&1 &
     fi
 
     # Block the AI and tell it to save. The "reason" becomes a system
