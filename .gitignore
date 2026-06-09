@@ -7,3 +7,10 @@ __pycache__/
 .coverage
 htmlcov/
 mempal.yaml
+
+# graphify knowledge graph — on versionne les artefacts, on ignore l'état local/transitoire
+graphify-out/cache/
+graphify-out/20*/
+graphify-out/.graphify_python
+graphify-out/.graphify_root
+graphify-out/.graphify_analysis.json

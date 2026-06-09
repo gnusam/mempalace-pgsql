@@ -1,0 +1,3 @@
+# Knowledge graph graphify : versionné dans git, jamais embarqué en prod
+graphify-out/
+.git

@@ -1,0 +1,227 @@
+{
+  ".claude/settings.local.json": {
+    "mtime": 1777145199.9405293,
+    "ast_hash": "acd60d1900fc9a6420934f8bcbcac705",
+    "semantic_hash": "acd60d1900fc9a6420934f8bcbcac705"
+  },
+  "benchmarks/convomem_bench.py": {
+    "mtime": 1775666613.7645762,
+    "ast_hash": "9c1973da1b2aaa879c878410d6cb1478",
+    "semantic_hash": "9c1973da1b2aaa879c878410d6cb1478"
+  },
+  "benchmarks/locomo_bench.py": {
+    "mtime": 1775666613.771243,
+    "ast_hash": "e0002aa476900586ace0758f12db093c",
+    "semantic_hash": "e0002aa476900586ace0758f12db093c"
+  },
+  "benchmarks/longmemeval_bench.py": {
+    "mtime": 1775666613.7779098,
+    "ast_hash": "1bf36a495f34045c277c34dbe9cbffec",
+    "semantic_hash": "1bf36a495f34045c277c34dbe9cbffec"
+  },
+  "benchmarks/membench_bench.py": {
+    "mtime": 1775666613.7645762,
+    "ast_hash": "72e59d83877a0564196fb51e2c483fe5",
+    "semantic_hash": "72e59d83877a0564196fb51e2c483fe5"
+  },
+  "examples/basic_mining.py": {
+    "mtime": 1775575152.3016727,
+    "ast_hash": "70500796ed1d87e5e2fa6a61e1288c0e",
+    "semantic_hash": "70500796ed1d87e5e2fa6a61e1288c0e"
+  },
+  "examples/convo_import.py": {
+    "mtime": 1775575152.3016727,
+    "ast_hash": "a0173d8dab0baf20058f53669976c2f0",
+    "semantic_hash": "a0173d8dab0baf20058f53669976c2f0"
+  },
+  "hooks/mempal_precompact_hook.sh": {
+    "mtime": 1777277797.7273529,
+    "ast_hash": "80bafea4f08708e6f054da58428e68a0",
+    "semantic_hash": "80bafea4f08708e6f054da58428e68a0"
+  },
+  "hooks/mempal_save_hook.sh": {
+    "mtime": 1777277779.0190735,
+    "ast_hash": "672f67e51ddedb7e548d7f9afe81c780",
+    "semantic_hash": "672f67e51ddedb7e548d7f9afe81c780"
+  },
+  "mcp-wrapper.sh": {
+    "mtime": 1780303612.0557983,
+    "ast_hash": "35b9354947783551a6ac0bb0faf0b82d",
+    "semantic_hash": "35b9354947783551a6ac0bb0faf0b82d"
+  },
+  "mempalace/__init__.py": {
+    "mtime": 1775638648.8338392,
+    "ast_hash": "357ff9088faff4aae52f845263c75e8c",
+    "semantic_hash": "357ff9088faff4aae52f845263c75e8c"
+  },
+  "mempalace/__main__.py": {
+    "mtime": 1775575152.3016727,
+    "ast_hash": "ce6eea8051da6e851799ac265823fe62",
+    "semantic_hash": "ce6eea8051da6e851799ac265823fe62"
+  },
+  "mempalace/cli.py": {
+    "mtime": 1777142267.0116303,
+    "ast_hash": "6ead4dd0b83d7c35e101bab6df0d0cd9",
+    "semantic_hash": "6ead4dd0b83d7c35e101bab6df0d0cd9"
+  },
+  "mempalace/config.py": {
+    "mtime": 1777142093.4863205,
+    "ast_hash": "0191d728f5530596c099f4881fab8731",
+    "semantic_hash": "0191d728f5530596c099f4881fab8731"
+  },
+  "mempalace/convo_miner.py": {
+    "mtime": 1777143398.1919737,
+    "ast_hash": "386a2424e2580541bf3aea9eaf03a689",
+    "semantic_hash": "386a2424e2580541bf3aea9eaf03a689"
+  },
+  "mempalace/db.py": {
+    "mtime": 1777143450.097274,
+    "ast_hash": "38b257c78bb11989e1182822245262b4",
+    "semantic_hash": "38b257c78bb11989e1182822245262b4"
+  },
+  "mempalace/dialect.py": {
+    "mtime": 1775638648.8338392,
+    "ast_hash": "88121f40ea5121ab82100777787451e1",
+    "semantic_hash": "88121f40ea5121ab82100777787451e1"
+  },
+  "mempalace/entity_detector.py": {
+    "mtime": 1777142406.8992279,
+    "ast_hash": "9997c3e0f060bda4930e28f2e4d6c5f7",
+    "semantic_hash": "9997c3e0f060bda4930e28f2e4d6c5f7"
+  },
+  "mempalace/entity_registry.py": {
+    "mtime": 1775638648.8338392,
+    "ast_hash": "306c4980f36f8703896759a3607b7471",
+    "semantic_hash": "306c4980f36f8703896759a3607b7471"
+  },
+  "mempalace/general_extractor.py": {
+    "mtime": 1775575152.3016727,
+    "ast_hash": "2a7b51db08c2a474e0ed0758307a1117",
+    "semantic_hash": "2a7b51db08c2a474e0ed0758307a1117"
+  },
+  "mempalace/init_schema.sql": {
+    "mtime": 1775761181.019623,
+    "ast_hash": "17f5610b65acc9a728078e54b8694ba4",
+    "semantic_hash": "17f5610b65acc9a728078e54b8694ba4"
+  },
+  "mempalace/layers.py": {
+    "mtime": 1775666595.0143933,
+    "ast_hash": "543f4c324ba73a3964afb8ffb37b8f23",
+    "semantic_hash": "543f4c324ba73a3964afb8ffb37b8f23"
+  },
+  "mempalace/mcp_server.py": {
+    "mtime": 1777145506.4997656,
+    "ast_hash": "84712b935e7a7939515ac8c43df1cb07",
+    "semantic_hash": "84712b935e7a7939515ac8c43df1cb07"
+  },
+  "mempalace/miner.py": {
+    "mtime": 1777143421.9524784,
+    "ast_hash": "eeae3b251c7e61103da2a6cd60ca30e6",
+    "semantic_hash": "eeae3b251c7e61103da2a6cd60ca30e6"
+  },
+  "mempalace/normalize.py": {
+    "mtime": 1775793882.5625508,
+    "ast_hash": "92aeec989099fb697535bf74efecd9ce",
+    "semantic_hash": "92aeec989099fb697535bf74efecd9ce"
+  },
+  "mempalace/onboarding.py": {
+    "mtime": 1775575152.3016727,
+    "ast_hash": "eda6d7ec82b1e1a34eb3ac4af240269d",
+    "semantic_hash": "eda6d7ec82b1e1a34eb3ac4af240269d"
+  },
+  "mempalace/palace_graph.py": {
+    "mtime": 1777277067.4654486,
+    "ast_hash": "480274279717c16b006241fc71af40d3",
+    "semantic_hash": "480274279717c16b006241fc71af40d3"
+  },
+  "mempalace/room_detector_local.py": {
+    "mtime": 1775638648.8338392,
+    "ast_hash": "130eef87c78f7c4b33bb4ab64ab1736c",
+    "semantic_hash": "130eef87c78f7c4b33bb4ab64ab1736c"
+  },
+  "mempalace/searcher.py": {
+    "mtime": 1775761150.2257986,
+    "ast_hash": "a19ac3948a03a91b615fa29b8890b884",
+    "semantic_hash": "a19ac3948a03a91b615fa29b8890b884"
+  },
+  "mempalace/spellcheck.py": {
+    "mtime": 1775575152.3016727,
+    "ast_hash": "0473caef8dbd7fcbb37eea6433cfec8d",
+    "semantic_hash": "0473caef8dbd7fcbb37eea6433cfec8d"
+  },
+  "mempalace/split_mega_files.py": {
+    "mtime": 1777142270.1906927,
+    "ast_hash": "8aab3fd836fd53b4bb61420f615f539b",
+    "semantic_hash": "8aab3fd836fd53b4bb61420f615f539b"
+  },
+  "mempalace/version.py": {
+    "mtime": 1775638648.8338392,
+    "ast_hash": "e04071f5caba5325fccef388df22995c",
+    "semantic_hash": "e04071f5caba5325fccef388df22995c"
+  },
+  "tests/conftest.py": {
+    "mtime": 1775638648.8338392,
+    "ast_hash": "5811db26203a32a32f69138714a90553",
+    "semantic_hash": "5811db26203a32a32f69138714a90553"
+  },
+  "tests/test_cli.py": {
+    "mtime": 1775794054.3185663,
+    "ast_hash": "614e856a361911f98e612ee59c1e2757",
+    "semantic_hash": "614e856a361911f98e612ee59c1e2757"
+  },
+  "tests/test_config.py": {
+    "mtime": 1777142104.503433,
+    "ast_hash": "db051b0fe38cecd4d42804ccab58323e",
+    "semantic_hash": "db051b0fe38cecd4d42804ccab58323e"
+  },
+  "tests/test_convo_miner.py": {
+    "mtime": 1777143398.1919737,
+    "ast_hash": "097fa1edf9e95e75455ec16572a5398c",
+    "semantic_hash": "097fa1edf9e95e75455ec16572a5398c"
+  },
+  "tests/test_db.py": {
+    "mtime": 1775715525.5653148,
+    "ast_hash": "0414ab3631240c450fcc25d816d07b07",
+    "semantic_hash": "0414ab3631240c450fcc25d816d07b07"
+  },
+  "tests/test_dialect.py": {
+    "mtime": 1775638648.8338392,
+    "ast_hash": "d72d8f8018bc77abcd200f2c58e45181",
+    "semantic_hash": "d72d8f8018bc77abcd200f2c58e45181"
+  },
+  "tests/test_entity_detector.py": {
+    "mtime": 1777142445.6648996,
+    "ast_hash": "947a296e1907883c9c4727599e40055a",
+    "semantic_hash": "947a296e1907883c9c4727599e40055a"
+  },
+  "tests/test_mcp_server.py": {
+    "mtime": 1777275997.2946715,
+    "ast_hash": "318b13788857b48e5b4a9debefb86dd2",
+    "semantic_hash": "318b13788857b48e5b4a9debefb86dd2"
+  },
+  "tests/test_miner.py": {
+    "mtime": 1777143421.9524784,
+    "ast_hash": "9a8acdc4de731f31125b87aea8019d2c",
+    "semantic_hash": "9a8acdc4de731f31125b87aea8019d2c"
+  },
+  "tests/test_normalize.py": {
+    "mtime": 1775793995.1743093,
+    "ast_hash": "02685c5c37889204bcb2709164d6cfd8",
+    "semantic_hash": "02685c5c37889204bcb2709164d6cfd8"
+  },
+  "tests/test_palace_graph_tunnels.py": {
+    "mtime": 1777277090.3647997,
+    "ast_hash": "349afe37f0cb1e87df026bcf0ebabb4f",
+    "semantic_hash": "349afe37f0cb1e87df026bcf0ebabb4f"
+  },
+  "tests/test_split_mega_files.py": {
+    "mtime": 1775794008.551185,
+    "ast_hash": "494f572899a64eb7d2d1bc5dbfce9b90",
+    "semantic_hash": "494f572899a64eb7d2d1bc5dbfce9b90"
+  },
+  "tests/test_version_consistency.py": {
+    "mtime": 1775638648.8338392,
+    "ast_hash": "509e37ed59ef5f0f521c6dabc4db4602",
+    "semantic_hash": "509e37ed59ef5f0f521c6dabc4db4602"
+  }
+}
