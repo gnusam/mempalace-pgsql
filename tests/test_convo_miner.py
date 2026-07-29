@@ -399,3 +399,48 @@ def test_content_hash_exists_excludes_own_source_file():
             db.close()
     finally:
         shutil.rmtree(tmpdir)
+
+
+# --- Authored timestamps (upstream cff43ad, #1890) ---
+
+
+def test_extract_authored_at_takes_latest_timestamp():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        f = Path(tmpdir) / "session.jsonl"
+        f.write_text(
+            '{"timestamp": "2026-07-01T10:00:00Z", "type": "user"}\n'
+            '{"timestamp": "2026-07-03T09:30:00Z", "type": "assistant"}\n'
+            '{"timestamp": "2026-07-02T08:00:00Z", "type": "user"}\n',
+            encoding="utf-8",
+        )
+        assert convo_miner._extract_authored_at(f) == "2026-07-03T09:30:00Z"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_extract_authored_at_tolerates_bad_lines_and_non_string_timestamps():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        f = Path(tmpdir) / "messy.jsonl"
+        f.write_text(
+            "not json at all\n"
+            '{"timestamp": 1234567890}\n'
+            '{"no_timestamp": true}\n'
+            '{"timestamp": "2026-06-15T12:00:00Z"}\n',
+            encoding="utf-8",
+        )
+        assert convo_miner._extract_authored_at(f) == "2026-06-15T12:00:00Z"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_extract_authored_at_none_for_non_jsonl():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        f = Path(tmpdir) / "notes.md"
+        f.write_text("> hello\nworld\n", encoding="utf-8")
+        assert convo_miner._extract_authored_at(f) is None
+        assert convo_miner._extract_authored_at(Path(tmpdir) / "missing.jsonl") is None
+    finally:
+        shutil.rmtree(tmpdir)

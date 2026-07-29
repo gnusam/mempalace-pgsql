@@ -9,6 +9,7 @@ Same palace as project mining. Different ingest strategy.
 """
 
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -234,6 +235,41 @@ def get_db_instance(palace_path: str = None):
     return get_db()
 
 
+def _extract_authored_at(filepath):
+    """Most-recent message timestamp in a transcript, used as the drawer's authored date.
+
+    Both Claude Code and Codex JSONL transcripts carry a top-level ISO-8601
+    ``timestamp`` on each line. We take the max so ``authored_at`` reflects
+    when the content was actually written, independent of when it was mined
+    (``filed_at``). This restores chronology: a session from days ago keeps
+    its real date even when re-mined today, instead of every drawer
+    collapsing to ingest time. Returns None for formats without per-line
+    timestamps (e.g. plain ``.md``). Port of upstream cff43ad (#1890).
+    """
+    path = Path(filepath)
+    if path.suffix != ".jsonl":
+        return None
+    latest = None
+    try:
+        with path.open(encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ts = json.loads(line).get("timestamp")
+                except (ValueError, TypeError, AttributeError):
+                    continue
+                # ISO-8601 timestamps are strings; guard against a non-string
+                # ``timestamp`` so a malformed line can't raise TypeError on
+                # compare.
+                if isinstance(ts, str) and (latest is None or ts > latest):
+                    latest = ts
+    except OSError:
+        return None
+    return latest
+
+
 def file_already_mined(db, source_file: str, extract_mode: str = "exchange") -> bool:
     # Scoped to this pass's extract mode so exchange-mode and general-mode
     # drawers for the same transcript track their own freshness (see
@@ -442,17 +478,25 @@ def mine_convos(
         # intact and re-chunked exchanges don't leave orphaned tail rows
         # (upstream PRs #2088/#2089, adapted — see
         # PalaceDB.replace_file_drawers).
+        # Authored timestamp (upstream cff43ad #1890): the transcript's own
+        # chronology, so a bulk re-mine doesn't collapse every drawer to
+        # ingest time. None for formats without per-line timestamps.
+        authored_at = _extract_authored_at(filepath)
+
         payload = []
         for chunk in chunks:
             chunk_room = chunk.get("memory_type", room) if extract_mode == "general" else room
             if extract_mode == "general":
                 room_counts[chunk_room] += 1
+            chunk_meta = {"file_content_hash": content_hash}
+            if authored_at:
+                chunk_meta["authored_at"] = authored_at
             payload.append(
                 {
                     "room": chunk_room,
                     "content": chunk["content"],
                     "chunk_index": chunk["chunk_index"],
-                    "metadata": {"file_content_hash": content_hash},
+                    "metadata": chunk_meta,
                 }
             )
         filed_ids = db.replace_file_drawers(

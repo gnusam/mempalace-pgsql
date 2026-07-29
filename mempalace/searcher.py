@@ -137,6 +137,9 @@ def search_memories(
                 "room": meta.get("room", "unknown"),
                 "source_file": Path(meta.get("source_file", "?")).name,
                 "similarity": round(max(0.0, 1 - dist), 3),
+                # When the content was written (transcript chronology,
+                # upstream cff43ad #1890), falling back to ingest time.
+                "authored_at": meta.get("authored_at") or meta.get("filed_at"),
             }
         )
 
