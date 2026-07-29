@@ -26,7 +26,7 @@ from datetime import datetime
 
 import psycopg2
 
-from .config import MempalaceConfig
+from .config import MempalaceConfig, sanitize_iso_date
 from .version import __version__
 from .searcher import search_memories
 from .palace_graph import traverse, find_tunnels, graph_stats
@@ -286,6 +286,10 @@ def tool_delete_drawer(drawer_id: str):
 
 def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
     """Query the knowledge graph for an entity's relationships."""
+    try:
+        as_of = sanitize_iso_date(as_of, "as_of")
+    except ValueError as e:
+        return {"error": str(e)}
     db = _get_db()
     results = db.query_entity(entity, as_of=as_of, direction=direction)
     return {"entity": entity, "as_of": as_of, "facts": results, "count": len(results)}
@@ -295,15 +299,23 @@ def tool_kg_add(
     subject: str, predicate: str, object: str, valid_from: str = None, source_closet: str = None
 ):
     """Add a relationship to the knowledge graph."""
-    db = _get_db()
-    triple_id = db.add_triple(
-        subject, predicate, object, valid_from=valid_from, source_closet=source_closet
-    )
+    try:
+        valid_from = sanitize_iso_date(valid_from, "valid_from")
+        db = _get_db()
+        triple_id = db.add_triple(
+            subject, predicate, object, valid_from=valid_from, source_closet=source_closet
+        )
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
     return {"success": True, "triple_id": triple_id, "fact": f"{subject} → {predicate} → {object}"}
 
 
 def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None):
     """Mark a fact as no longer true (set end date)."""
+    try:
+        ended = sanitize_iso_date(ended, "ended")
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
     db = _get_db()
     db.invalidate(subject, predicate, object, ended=ended)
     return {

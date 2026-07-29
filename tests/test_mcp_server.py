@@ -403,3 +403,40 @@ def test_check_duplicate_reports_zero_not_negative(monkeypatch):
     # threshold 0 admits everything, exposing the reported similarity value
     result = mcp_server.tool_check_duplicate("some content", threshold=0.0)
     assert result["matches"][0]["similarity"] == 0.0
+
+
+# ── KG date validation at the MCP boundary (upstream 4d98b05 + abe8576) ───
+
+
+def test_kg_query_rejects_malformed_as_of(monkeypatch):
+    called = []
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: called.append(1))
+    result = mcp_server.tool_kg_query("Alice", as_of="March 2026")
+    assert "error" in result
+    assert "as_of" in result["error"]
+    assert not called, "storage layer must not be reached on invalid input"
+
+
+def test_kg_add_rejects_malformed_valid_from(monkeypatch):
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: None)
+    result = mcp_server.tool_kg_add("Alice", "works_at", "Acme", valid_from="2026")
+    assert result["success"] is False
+    assert "valid_from" in result["error"]
+
+
+def test_kg_invalidate_rejects_malformed_ended(monkeypatch):
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: None)
+    result = mcp_server.tool_kg_invalidate("Alice", "works_at", "Acme", ended="yesterday")
+    assert result["success"] is False
+    assert "ended" in result["error"]
+
+
+def test_kg_add_surfaces_inverted_interval_error(monkeypatch):
+    class _RaisingDB:
+        def add_triple(self, *a, **kw):
+            raise ValueError("valid_to='2026-01-01' is before valid_from='2026-02-01'")
+
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: _RaisingDB())
+    result = mcp_server.tool_kg_add("Alice", "works_at", "Acme", valid_from="2026-02-01")
+    assert result["success"] is False
+    assert "before valid_from" in result["error"]

@@ -508,6 +508,16 @@ class PalaceDB:
         source_closet=None,
         source_file=None,
     ):
+        # Reject inverted intervals: a triple with valid_to < valid_from
+        # would never satisfy `valid_from <= as_of AND valid_to > as_of`,
+        # so it would be invisible to every as-of query — silently corrupt.
+        # Same-day intervals (point-in-time facts) are explicitly allowed.
+        if valid_from is not None and valid_to is not None and valid_to < valid_from:
+            raise ValueError(
+                f"valid_to={valid_to!r} is before valid_from={valid_from!r}; "
+                "an inverted interval would be invisible to every KG query"
+            )
+
         sub_id = self._entity_id(subject)
         obj_id = self._entity_id(obj)
         pred_norm = predicate.lower().replace(" ", "_")

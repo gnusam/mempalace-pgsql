@@ -6,6 +6,7 @@ Priority: env vars > config file (~/.mempalace/config.json) > defaults
 
 import json
 import os
+import re
 from pathlib import Path
 
 DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
@@ -60,6 +61,36 @@ DEFAULT_HALL_KEYWORDS = {
     "family": ["family", "kids", "children", "daughter", "son", "parent", "mother", "father"],
     "creative": ["game", "gameplay", "player", "app", "design", "art", "music", "story"],
 }
+
+
+# ISO-8601 date validator for knowledge-graph temporal parameters (as_of,
+# valid_from, valid_to, ended). Parameterized queries already prevent SQL
+# injection, but unvalidated date strings silently miss every row — callers
+# cannot distinguish "no fact at this time" from "your date format was
+# unrecognized", which is especially painful for LLM callers that synthesize
+# dates like "March 2026". Require full YYYY-MM-DD: KG queries compare TEXT
+# dates lexicographically, so partials like "2026" would re-introduce silent
+# empty results ("2026-01-01" <= "2026" is False).
+_ISO_DATE_RE = re.compile(r"^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$")
+
+
+def sanitize_iso_date(value, field_name="date"):
+    """Validate an ISO-8601 date string, accepting None or empty as-is.
+
+    Accepts only ``YYYY-MM-DD``. Raises ValueError on any other non-empty
+    input so the MCP layer can surface a clear error to the caller instead
+    of silently returning empty results.
+    """
+    if value is None or value == "":
+        return value
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    value = value.strip()
+    if not _ISO_DATE_RE.match(value):
+        raise ValueError(
+            f"{field_name}={value!r} is not a valid ISO-8601 date (expected YYYY-MM-DD)"
+        )
+    return value
 
 
 class MempalaceConfig:

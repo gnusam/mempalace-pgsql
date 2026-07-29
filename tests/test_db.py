@@ -448,3 +448,23 @@ class TestKGTemporalSemantics:
         assert any(f["object"] == "test_paris" for f in facts)
         facts_after = db.query_entity("test_bob", as_of="2026-03-16")
         assert not any(f["object"] == "test_paris" for f in facts_after)
+
+    def test_add_triple_rejects_inverted_interval(self, db):
+        with pytest.raises(ValueError, match="before valid_from"):
+            db.add_triple(
+                "test_carol",
+                "worked_at",
+                "test_initech",
+                valid_from="2026-03-01",
+                valid_to="2026-02-01",
+            )
+
+    def test_add_triple_accepts_equal_dates(self, db):
+        tid = db.add_triple(
+            "test_carol",
+            "joined",
+            "test_initech",
+            valid_from="2026-03-15",
+            valid_to="2026-03-15",
+        )
+        assert tid is not None
