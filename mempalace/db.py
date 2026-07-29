@@ -96,6 +96,18 @@ def embed(texts):
     return [np.array(e, dtype=np.float32) for e in embeddings]
 
 
+# Half-open validity interval for as-of KG queries: a fact whose valid_to
+# equals the query instant has already ended at that instant, so the interval
+# is [valid_from, valid_to) and the upper bound is strict (>). This lets a
+# fact and its successor share a boundary instant without an as-of query
+# returning both. Date-only valid_to (length 10, TEXT lexicographic compare)
+# still expands to the end of that day, so a standalone date-only fact stays
+# valid through its whole final day exactly as before.
+_VALID_TO_EXPR = (
+    "(CASE WHEN LENGTH(t.valid_to) = 10 THEN t.valid_to || 'T23:59:59' ELSE t.valid_to END)"
+)
+
+
 class PalaceDB:
     """Single database for drawers (vectors) + knowledge graph."""
 
@@ -567,7 +579,7 @@ class PalaceDB:
 
         if as_of:
             sql += " AND (t.valid_from IS NULL OR t.valid_from <= %s)"
-            sql += " AND (t.valid_to IS NULL OR t.valid_to >= %s)"
+            sql += f" AND (t.valid_to IS NULL OR {_VALID_TO_EXPR} > %s)"
             params += [as_of, as_of]
 
         sql += " ORDER BY t.valid_from ASC NULLS LAST"
@@ -603,7 +615,7 @@ class PalaceDB:
         params = [pred_norm]
         if as_of:
             sql += " AND (t.valid_from IS NULL OR t.valid_from <= %s)"
-            sql += " AND (t.valid_to IS NULL OR t.valid_to >= %s)"
+            sql += f" AND (t.valid_to IS NULL OR {_VALID_TO_EXPR} > %s)"
             params += [as_of, as_of]
 
         cur = self.conn().cursor(cursor_factory=psycopg2.extras.RealDictCursor)

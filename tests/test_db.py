@@ -406,3 +406,45 @@ class TestPgSanitization:
         got = db.get_drawers(where={"wing": "test_nul"})
         idx = got["ids"].index(did)
         assert got["documents"][idx] == "café ✓ ok"
+
+
+# ── KG temporal semantics (ports of upstream 9815f0a / 0b8c2c1) ──────────
+
+
+class TestKGTemporalSemantics:
+    def test_as_of_boundary_returns_only_successor(self, db):
+        """Half-open interval [valid_from, valid_to): when a fact and its
+        successor share a boundary instant, an as-of query at that instant
+        must return only the successor, not both."""
+        db.add_triple(
+            "test_alice",
+            "works_at",
+            "test_acme",
+            valid_from="2026-01-01T00:00:00",
+            valid_to="2026-06-01T09:00:00",
+        )
+        db.add_triple(
+            "test_alice",
+            "works_at",
+            "test_globex",
+            valid_from="2026-06-01T09:00:00",
+        )
+        facts = db.query_entity("test_alice", as_of="2026-06-01T09:00:00")
+        objects = {f["object"] for f in facts}
+        assert "test_globex" in objects
+        assert "test_acme" not in objects
+
+    def test_date_only_fact_valid_through_final_day(self, db):
+        """A date-only valid_to still expands to end-of-day: the fact stays
+        valid through its whole final day, as before the half-open change."""
+        db.add_triple(
+            "test_bob",
+            "lives_in",
+            "test_paris",
+            valid_from="2026-01-01",
+            valid_to="2026-03-15",
+        )
+        facts = db.query_entity("test_bob", as_of="2026-03-15")
+        assert any(f["object"] == "test_paris" for f in facts)
+        facts_after = db.query_entity("test_bob", as_of="2026-03-16")
+        assert not any(f["object"] == "test_paris" for f in facts_after)
