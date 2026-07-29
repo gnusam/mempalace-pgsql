@@ -56,6 +56,10 @@ packages = ["mempalace"]
 [tool.ruff]
 line-length = 100
 target-version = "py39"
+# ruff >= 0.16 formats fenced Python blocks inside Markdown; keep docs
+# (README code examples, benchmark notes) verbatim instead of letting the
+# formatter explode them, and keep CI stable across ruff releases.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W"]
