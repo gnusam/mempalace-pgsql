@@ -29,13 +29,51 @@ EMBEDDING_DIM = 384
 _model = None
 
 
+_POWER_SUPPLY_PATH = Path("/sys/class/power_supply")
+
+
+def _on_ac_power() -> bool:
+    """True if plugged into AC mains, False if on battery.
+
+    Returns True (assume plugged) when no Mains adapter is reported — desktop
+    boxes, or sysfs unreadable from inside a container without /sys mounted.
+    """
+    try:
+        for ps in _POWER_SUPPLY_PATH.iterdir():
+            try:
+                if (ps / "type").read_text().strip() == "Mains":
+                    return (ps / "online").read_text().strip() == "1"
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return True
+
+
+def _select_device(cuda_available: bool) -> str:
+    """Pick the embedding device.
+
+    MEMPALACE_DEVICE env var overrides auto-detect. Auto picks GPU when
+    plugged in, CPU on battery — frees the dGPU to hit D3cold runtime
+    suspend instead of holding ~260 MiB VRAM idle on a laptop.
+    """
+    override = os.environ.get("MEMPALACE_DEVICE", "").lower()
+    if override == "cpu":
+        return "cpu"
+    if override == "cuda":
+        return "cuda" if cuda_available else "cpu"
+    if cuda_available and _on_ac_power():
+        return "cuda"
+    return "cpu"
+
+
 def _get_model():
     global _model
     if _model is None:
         from sentence_transformers import SentenceTransformer
         import torch
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = _select_device(torch.cuda.is_available())
         _model = SentenceTransformer(EMBEDDING_MODEL, device=device)
         logger.info(f"Loaded {EMBEDDING_MODEL} on {device}")
     return _model

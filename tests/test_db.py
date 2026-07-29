@@ -468,3 +468,88 @@ class TestKGTemporalSemantics:
             valid_to="2026-03-15",
         )
         assert tid is not None
+
+
+# ── Battery-aware embedding device selection (no DB required) ────────────
+
+
+class TestDeviceSelection:
+    def _fake_sysfs(self, tmp_path, entries):
+        """entries: list of (type, online) tuples; online may be None."""
+        for i, (ps_type, online) in enumerate(entries):
+            ps = tmp_path / f"ps{i}"
+            ps.mkdir()
+            (ps / "type").write_text(ps_type + "\n")
+            if online is not None:
+                (ps / "online").write_text(online + "\n")
+        return tmp_path
+
+    def test_on_ac_power_mains_online(self, tmp_path, monkeypatch):
+        import mempalace.db as mdb
+
+        monkeypatch.setattr(mdb, "_POWER_SUPPLY_PATH", self._fake_sysfs(tmp_path, [("Mains", "1")]))
+        assert mdb._on_ac_power() is True
+
+    def test_on_ac_power_mains_offline(self, tmp_path, monkeypatch):
+        import mempalace.db as mdb
+
+        monkeypatch.setattr(
+            mdb,
+            "_POWER_SUPPLY_PATH",
+            self._fake_sysfs(tmp_path, [("Battery", None), ("Mains", "0")]),
+        )
+        assert mdb._on_ac_power() is False
+
+    def test_on_ac_power_no_mains_assumes_plugged(self, tmp_path, monkeypatch):
+        import mempalace.db as mdb
+
+        monkeypatch.setattr(
+            mdb, "_POWER_SUPPLY_PATH", self._fake_sysfs(tmp_path, [("Battery", None)])
+        )
+        assert mdb._on_ac_power() is True
+
+    def test_on_ac_power_missing_sysfs_assumes_plugged(self, tmp_path, monkeypatch):
+        import mempalace.db as mdb
+
+        monkeypatch.setattr(mdb, "_POWER_SUPPLY_PATH", tmp_path / "does-not-exist")
+        assert mdb._on_ac_power() is True
+
+    def test_override_cpu_wins_over_cuda(self, monkeypatch):
+        import mempalace.db as mdb
+
+        monkeypatch.setenv("MEMPALACE_DEVICE", "cpu")
+        monkeypatch.setattr(mdb, "_on_ac_power", lambda: True)
+        assert mdb._select_device(cuda_available=True) == "cpu"
+
+    def test_override_cuda_ignores_battery(self, monkeypatch):
+        import mempalace.db as mdb
+
+        monkeypatch.setenv("MEMPALACE_DEVICE", "cuda")
+        monkeypatch.setattr(mdb, "_on_ac_power", lambda: False)
+        assert mdb._select_device(cuda_available=True) == "cuda"
+
+    def test_override_cuda_falls_back_without_gpu(self, monkeypatch):
+        import mempalace.db as mdb
+
+        monkeypatch.setenv("MEMPALACE_DEVICE", "cuda")
+        assert mdb._select_device(cuda_available=False) == "cpu"
+
+    def test_auto_gpu_on_ac(self, monkeypatch):
+        import mempalace.db as mdb
+
+        monkeypatch.delenv("MEMPALACE_DEVICE", raising=False)
+        monkeypatch.setattr(mdb, "_on_ac_power", lambda: True)
+        assert mdb._select_device(cuda_available=True) == "cuda"
+
+    def test_auto_cpu_on_battery(self, monkeypatch):
+        import mempalace.db as mdb
+
+        monkeypatch.delenv("MEMPALACE_DEVICE", raising=False)
+        monkeypatch.setattr(mdb, "_on_ac_power", lambda: False)
+        assert mdb._select_device(cuda_available=True) == "cpu"
+
+    def test_auto_cpu_without_gpu(self, monkeypatch):
+        import mempalace.db as mdb
+
+        monkeypatch.delenv("MEMPALACE_DEVICE", raising=False)
+        assert mdb._select_device(cuda_available=False) == "cpu"

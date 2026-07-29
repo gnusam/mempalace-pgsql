@@ -52,6 +52,7 @@ services:
       - /home/sam/dev:/projects:ro
       - ./mempalace:/app/mempalace:ro
       - ./tests:/app/tests:ro
+      - /sys:/sys:ro
 
 volumes:
   pgdata:

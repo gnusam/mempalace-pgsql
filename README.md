@@ -79,6 +79,7 @@ MemPalace reads its configuration from three sources, in priority order: **envir
 | `DATABASE_URL` | PostgreSQL connection string (used by `mempalace.db` and every CLI/MCP entrypoint). | `postgresql://mempalace:mempalace@localhost:5433/mempalace` |
 | `MEMPALACE_PALACE_PATH` | Path to the memory palace data directory (markdown mirror of the DB). `MEMPAL_PALACE_PATH` is accepted as a legacy alias. | `~/.mempalace/palace` |
 | `MEMPALACE_SOURCE_DIR` | Source directory scanned by `mempalace.split_mega_files` when mining conversation transcripts. | `~/Desktop/transcripts` |
+| `MEMPALACE_DEVICE` | Embedding device: `cpu` or `cuda` (forced). Unset = auto: GPU when on AC power, CPU on battery — lets the dGPU reach D3cold runtime suspend on laptops instead of holding ~260 MiB VRAM idle. AC detection reads `/sys/class/power_supply` (mounted read-only into the container by `docker-compose.yml`); when no Mains adapter is visible, GPU is assumed. | auto |
 
 Example — running the CLI against a non-default Postgres on the host:
 
@@ -252,6 +253,8 @@ After the one-time setup (install → init → mine), you don't run MemPalace co
 # Connect MemPalace once
 claude mcp add mempalace -- python -m mempalace.mcp_server
 ```
+
+For the Docker Compose deployment, point the MCP entry at `mcp-wrapper.sh` instead. The wrapper reaps orphaned MCP containers from dead sessions, ensures postgres is up, and applies the battery policy at container level: on battery (or when another mempalace MCP container already holds the GPU) it starts the container without `--gpus` and forces `MEMPALACE_DEVICE=cpu`; on AC it reserves the GPU. It also mounts `/sys` read-only so `_on_ac_power()` keeps working inside the container.
 
 Now your AI has 19 tools available through MCP. Ask it anything:
 
