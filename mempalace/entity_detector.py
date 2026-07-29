@@ -519,11 +519,40 @@ SKIP_FILENAMES = {
 # ==================== CANDIDATE EXTRACTION ====================
 
 
+# Proper nouns are short and space-delimited; a whitespace-free run of 30+
+# characters is base64, a minified blob, or a code identifier — never an
+# entity. This pattern is linear (a single greedy quantifier over a character
+# class, no alternation or nesting) so it cannot itself backtrack.
+_LONG_TOKEN_RE = re.compile(r"\S{30,}")
+
+
+def _strip_long_tokens(text: str) -> str:
+    """Collapse whitespace-free runs of 30+ chars to a single space.
+
+    The CamelCase candidate pattern's nested ambiguous quantifiers
+    (``(?:[A-Z][a-z]+|[A-Z]{2,})+``) can partition a long whitespace-free
+    mixed-case run in exponentially many ways. Natural language never
+    triggers this, but base64 blobs and minified code embed thousands of
+    whitespace-free characters and pin ``re.findall`` at 100% CPU for
+    hours, hanging ``mempalace mine`` indefinitely (upstream issue #2063).
+
+    Removing such runs before the candidate regexes ever see them drops a
+    5000-char blob from hours to well under a millisecond, with no effect
+    on natural-language extraction (proper nouns are far shorter than 30
+    chars — the simple-name pattern itself caps at 20).
+    """
+    return _LONG_TOKEN_RE.sub(" ", text)
+
+
 def extract_candidates(text: str) -> dict:
     """
     Extract all capitalized proper noun candidates from text.
     Returns {name: frequency} for names appearing 3+ times.
     """
+    # Guard the candidate regexes against catastrophic backtracking on
+    # base64 / minified content before any pattern runs (upstream #2063).
+    text = _strip_long_tokens(text)
+
     counts = defaultdict(int)
 
     # CamelCase / PascalCase product names FIRST so they're captured whole

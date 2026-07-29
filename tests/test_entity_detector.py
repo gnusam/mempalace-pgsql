@@ -119,3 +119,57 @@ def test_extract_candidates_drops_participle_stopwords():
     assert "Created" not in candidates
     assert "Updated" not in candidates
     assert "Processed" not in candidates
+
+
+# --- ReDoS guard: long whitespace-free runs (upstream #2063, PR #2082) ---
+
+
+def _run_within(fn, timeout=10.0):
+    """Run ``fn`` in a worker thread and fail if it does not finish in time.
+
+    A regression reintroducing the catastrophic backtracking would hang
+    ``re.findall`` for hours; this bounds the test instead of hanging CI.
+    """
+    import threading
+
+    box = {}
+
+    def target():
+        box["value"] = fn()
+
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(timeout)
+    assert not t.is_alive(), "call did not complete in time — candidate regex hung"
+    return box["value"]
+
+
+def test_strip_long_tokens_collapses_long_runs():
+    from mempalace.entity_detector import _strip_long_tokens
+
+    assert _strip_long_tokens("A" * 30) == " "
+    assert _strip_long_tokens("A" * 29) == "A" * 29
+    blob = "x" * 100
+    out = _strip_long_tokens("before " + blob + " after")
+    assert blob not in out
+    assert "before" in out and "after" in out
+
+
+def test_strip_long_tokens_preserves_natural_language():
+    from mempalace.entity_detector import _strip_long_tokens
+
+    text = "Riley said hello to Devon about the GraphQL migration."
+    assert _strip_long_tokens(text) == text
+
+
+def test_extract_candidates_neutralizes_pathological_blob():
+    """Base64 / minified content must not hang candidate extraction
+    (upstream #2063). ``Xa`` enters the CamelCase pattern, the long
+    uppercase run explodes the nested ``(?:[A-Z][a-z]+|[A-Z]{2,})+``
+    quantifier, and the trailing digit defeats the closing word boundary —
+    unguarded, ``re.findall`` never returns."""
+    blob = "Xa" + ("B" * 45) + "1"
+    text = ("Riley said hi. Riley laughed. Riley smiled. " + blob + " and Riley waved. ") * 3
+    result = _run_within(lambda: extract_candidates(text))
+    assert "Riley" in result  # natural-language extraction still works
+    assert blob not in result  # the blob never becomes an entity
