@@ -8,6 +8,7 @@ Normalizes format, chunks by exchange pair (Q+A = one unit), files to palace.
 Same palace as project mining. Different ingest strategy.
 """
 
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -361,6 +362,20 @@ def mine_convos(
                 )
             continue
 
+        # Content dedup (adapted from upstream PR #2050): the same
+        # conversation re-exported under a new filename must not duplicate
+        # every drawer under fresh file+chunk slot IDs. Hash the whole
+        # normalized transcript; if another file already carries it, skip
+        # this one and register the sentinel so it isn't re-checked every
+        # run. The file's own rows are excluded, so a renamed-in-place or
+        # touch'd file still re-mines under its own name.
+        content_hash = hashlib.md5(content.encode()).hexdigest()
+        if not dry_run and db.content_hash_exists(content_hash, source_file):
+            db.register_empty_file(source_file, wing, agent, source_mtime=source_mtime)
+            files_skipped += 1
+            print(f"  = [{i:4}/{len(files)}] {filepath.name[:50]:50} duplicate content, skipped")
+            continue
+
         # Chunk — either exchange pairs or general extraction
         if extract_mode == "general":
             from .general_extractor import extract_memories
@@ -425,6 +440,7 @@ def mine_convos(
                     "room": chunk_room,
                     "content": chunk["content"],
                     "chunk_index": chunk["chunk_index"],
+                    "metadata": {"file_content_hash": content_hash},
                 }
             )
         filed_ids = db.replace_file_drawers(

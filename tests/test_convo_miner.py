@@ -238,6 +238,9 @@ def test_mine_convos_files_atomically_with_read_time_mtime(monkeypatch):
         def file_already_mined(self, source_file, ingest_mode=None, extract_mode=None):
             return False
 
+        def content_hash_exists(self, file_content_hash, exclude_source_file):
+            return False
+
         def register_empty_file(self, *args, **kwargs):
             raise AssertionError("should not be called: chunks exist")
 
@@ -308,6 +311,85 @@ def test_register_empty_file_makes_file_already_mined_true():
             sentinel_id = db.register_empty_file(str(empty), wing=wing)
             assert sentinel_id is not None
             assert db.file_already_mined(str(empty)) is True
+        finally:
+            cur = db.conn().cursor()
+            cur.execute("DELETE FROM drawers WHERE wing = %s", (wing,))
+            db.close()
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+# --- Content-hash dedup (upstream PR #2050, adapted) ---
+
+
+def test_mine_convos_skips_duplicate_content_under_new_filename():
+    """The same conversation re-exported under a new filename must not
+    duplicate every drawer under fresh file+chunk slot IDs (upstream PR
+    #2050). The duplicate gets a sentinel so it isn't re-checked every run."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        convo = (
+            "> What is memory?\nMemory is persistence over time.\n\n"
+            "> Why does it matter?\nIt enables continuity of thought.\n\n"
+            "> How do we build it?\nWith structured vector storage.\n"
+        )
+        (Path(tmpdir) / "original.txt").write_text(convo, encoding="utf-8")
+        (Path(tmpdir) / "re-export.txt").write_text(convo, encoding="utf-8")
+
+        wing = "test_convo_dedup"
+        mine_convos(tmpdir, palace_path=None, wing=wing)
+
+        db = PalaceDB(DATABASE_URL)
+        try:
+            cur = db.conn().cursor()
+            cur.execute(
+                "SELECT COUNT(DISTINCT source_file) FROM drawers "
+                "WHERE wing = %s AND embedding IS NOT NULL",
+                (wing,),
+            )
+            assert cur.fetchone()[0] == 1, (
+                "both files were mined — duplicate content was not detected"
+            )
+            # The duplicate carries a registry sentinel, not real drawers.
+            cur.execute(
+                "SELECT COUNT(*) FROM drawers WHERE wing = %s "
+                "AND metadata->>'ingest_mode' = 'registry'",
+                (wing,),
+            )
+            assert cur.fetchone()[0] == 1
+        finally:
+            cur = db.conn().cursor()
+            cur.execute("DELETE FROM drawers WHERE wing = %s", (wing,))
+            db.close()
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_content_hash_exists_excludes_own_source_file():
+    """A touch'd but unchanged file must still re-mine under its own name —
+    its own rows may not satisfy the duplicate probe."""
+    import hashlib as _hashlib
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        f = Path(tmpdir) / "own.txt"
+        f.write_text("> q\nsome answer content here\n", encoding="utf-8")
+        src = str(f)
+        h = _hashlib.md5(b"probe-content").hexdigest()
+
+        db = PalaceDB(DATABASE_URL)
+        wing = "test_hash_probe"
+        try:
+            db.add_drawer(
+                wing,
+                "general",
+                "probe drawer content " * 5,
+                source_file=src,
+                chunk_index=0,
+                metadata={"file_content_hash": h},
+            )
+            assert db.content_hash_exists(h, src) is False
+            assert db.content_hash_exists(h, "/some/other/file.txt") is True
         finally:
             cur = db.conn().cursor()
             cur.execute("DELETE FROM drawers WHERE wing = %s", (wing,))

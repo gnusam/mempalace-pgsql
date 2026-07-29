@@ -502,6 +502,28 @@ class PalaceDB:
         finally:
             conn.autocommit = old_autocommit
 
+    def content_hash_exists(self, file_content_hash, exclude_source_file):
+        """True if another file's drawers already carry this content hash.
+
+        Adapted from upstream PR #2050 (prefetch_content_hashes): the same
+        conversation re-exported under a new filename must not duplicate
+        every drawer under fresh slot IDs. The caller hashes the whole
+        normalized transcript; drawers store it as
+        ``metadata->>'file_content_hash'`` (indexed by expression, see
+        init_schema.sql). The file's own rows are excluded so a touch'd but
+        unchanged file still re-mines under its own name.
+
+        Pre-hash legacy drawers carry no hash and never match — dedup
+        applies to newly mined files only.
+        """
+        cur = self.conn().cursor()
+        cur.execute(
+            "SELECT 1 FROM drawers WHERE metadata->>'file_content_hash' = %s "
+            "AND source_file <> %s LIMIT 1",
+            (file_content_hash, exclude_source_file),
+        )
+        return cur.fetchone() is not None
+
     def file_already_mined(self, source_file, ingest_mode=None, extract_mode=None):
         """Fast check: has this file been filed before AND is unchanged?
 

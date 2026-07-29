@@ -16,6 +16,11 @@ CREATE TABLE IF NOT EXISTS drawers (
 CREATE INDEX IF NOT EXISTS idx_drawers_wing ON drawers(wing);
 CREATE INDEX IF NOT EXISTS idx_drawers_room ON drawers(room);
 CREATE INDEX IF NOT EXISTS idx_drawers_source ON drawers(source_file);
+-- Expression index backing PalaceDB.content_hash_exists (content dedup for
+-- re-exported transcripts, adapted from upstream PR #2050). For an existing
+-- database this statement must be run once by hand — the init script only
+-- executes on a fresh volume.
+CREATE INDEX IF NOT EXISTS idx_drawers_file_hash ON drawers ((metadata->>'file_content_hash'));
 -- HNSW params tuned for 400k+ corpora:
 --   m = 32 (vs default 16): denser graph, higher recall at query time.
 --   ef_construction = 200 (vs default 64): better graph quality at build time.
