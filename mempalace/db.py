@@ -194,6 +194,162 @@ class PalaceDB:
 
     # ── Drawers ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _mining_drawer_id(wing, room, source_file, chunk_index):
+        """Deterministic per file+chunk slot ID (mining path)."""
+        digest = hashlib.md5((source_file + str(chunk_index)).encode()).hexdigest()[:16]
+        return f"drawer_{wing}_{room}_{digest}"
+
+    @staticmethod
+    def _registry_sentinel_id(source_file):
+        """Deterministic ID of the 0-chunk registry sentinel for a file."""
+        return f"_reg_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
+
+    @staticmethod
+    def _scope_clause(ingest_mode, extract_mode, include_registry=False):
+        """SQL fragment + params selecting one mining scope's drawers.
+
+        A "scope" is the set of drawers one mining pass owns for a
+        source_file: project mining writes no ingest_mode key, convo mining
+        writes ingest_mode='convos' plus its extract_mode (legacy convo rows
+        without extract_mode count as 'exchange'). Scoping both the staleness
+        check and the stale-row purge to the active pass is what lets
+        exchange-mode and general-mode drawers coexist for the same
+        transcript without deleting or invalidating each other — the
+        over-match class upstream hit in PR #2089, where a legacy
+        no-extract_mode rule purged the sweeper's own drawers.
+
+        With ``include_registry`` (the freshness check) the file's 0-chunk
+        registry sentinel counts toward any scope — "this file yielded
+        nothing at mtime m" is scope-independent information. The purge in
+        replace_file_drawers leaves it out: sentinel lifecycle belongs to
+        register_empty_file and the explicit by-id delete when chunks land.
+        """
+        if ingest_mode is None:
+            clause = "((metadata->>'ingest_mode') IS NULL)"
+            params = []
+        else:
+            clause = (
+                "(metadata->>'ingest_mode' = %s"
+                " AND COALESCE(metadata->>'extract_mode', 'exchange') = %s)"
+            )
+            params = [ingest_mode, extract_mode or "exchange"]
+        if include_registry:
+            clause = f"({clause} OR metadata->>'ingest_mode' = 'registry')"
+        return clause, params
+
+    def replace_file_drawers(
+        self,
+        wing,
+        chunks,
+        source_file,
+        agent="mempalace",
+        source_mtime=None,
+        ingest_mode=None,
+        extract_mode=None,
+    ):
+        """Atomically replace one scope's drawers for a file with a new chunk set.
+
+        ``chunks`` is a list of dicts with ``room``, ``content``,
+        ``chunk_index`` and optional ``metadata``. The stale-row purge and
+        every insert commit as ONE transaction, so a mine killed mid-file
+        leaves the previous state fully intact instead of a partial batch
+        that file_already_mined() would mistake for a complete mine, and a
+        failed purge aborts the whole attempt instead of letting old and new
+        rows coexist (adapted from upstream PR #2088 — upstream needs a
+        chunk_total completion marker because ChromaDB commits batch by
+        batch; PostgreSQL lets us make the whole file atomic instead).
+
+        Rows outside the (ingest_mode, extract_mode) scope survive: see
+        _scope_clause. An empty ``chunks`` list purges the scope's rows —
+        a file whose current content yields nothing must not keep serving
+        its old drawers. The file's registry sentinel is dropped whenever
+        real chunks land, so a formerly-empty file doesn't keep a stale
+        sentinel that fails the freshness check forever.
+
+        ``source_mtime`` must be the mtime paired with the content the
+        caller actually read and chunked — never a later re-stat (upstream
+        PR #2088's TOCTOU: an append landing between read and re-stat gets
+        stamped as already-mined and is silently skipped forever).
+        """
+        source_file = _sanitize_pg_str(source_file)
+        contents = [_sanitize_pg_str(c["content"]) for c in chunks]
+        embeddings = embed(contents) if contents else []
+        now = datetime.now()
+        rows = []
+        for chunk, content, emb in zip(chunks, contents, embeddings):
+            meta_dict = dict(chunk.get("metadata") or {})
+            if ingest_mode:
+                meta_dict.setdefault("ingest_mode", ingest_mode)
+                if extract_mode:
+                    meta_dict.setdefault("extract_mode", extract_mode)
+            if source_mtime is not None:
+                meta_dict["source_mtime"] = source_mtime
+            rows.append(
+                (
+                    self._mining_drawer_id(wing, chunk["room"], source_file, chunk["chunk_index"]),
+                    chunk["room"],
+                    content,
+                    emb,
+                    chunk["chunk_index"],
+                    json.dumps(_sanitize_pg(meta_dict)),
+                )
+            )
+
+        scope_sql, scope_params = self._scope_clause(ingest_mode, extract_mode)
+        keep_ids = [r[0] for r in rows]
+        conn = self.conn()
+        old_autocommit = conn.autocommit
+        conn.autocommit = False
+        try:
+            cur = conn.cursor()
+            delete_sql = f"DELETE FROM drawers WHERE source_file = %s AND {scope_sql}"
+            delete_params = [source_file, *scope_params]
+            if keep_ids:
+                delete_sql += " AND NOT (id = ANY(%s))"
+                delete_params.append(keep_ids)
+            cur.execute(delete_sql, delete_params)
+            if keep_ids:
+                cur.execute(
+                    "DELETE FROM drawers WHERE id = %s",
+                    (self._registry_sentinel_id(source_file),),
+                )
+            for drawer_id, room, content, emb, chunk_index, meta in rows:
+                cur.execute(
+                    """INSERT INTO drawers (id, wing, room, content, embedding, source_file,
+                       chunk_index, added_by, filed_at, metadata)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (id) DO UPDATE SET
+                         wing        = EXCLUDED.wing,
+                         room        = EXCLUDED.room,
+                         content     = EXCLUDED.content,
+                         embedding   = EXCLUDED.embedding,
+                         source_file = EXCLUDED.source_file,
+                         chunk_index = EXCLUDED.chunk_index,
+                         added_by    = EXCLUDED.added_by,
+                         filed_at    = EXCLUDED.filed_at,
+                         metadata    = EXCLUDED.metadata""",
+                    (
+                        drawer_id,
+                        wing,
+                        room,
+                        content,
+                        emb,
+                        source_file,
+                        chunk_index,
+                        agent,
+                        now,
+                        meta,
+                    ),
+                )
+            conn.commit()
+            return keep_ids
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.autocommit = old_autocommit
+
     def add_drawer(
         self, wing, room, content, source_file="", chunk_index=0, agent="mempalace", metadata=None
     ):
@@ -213,10 +369,10 @@ class PalaceDB:
         content = _sanitize_pg_str(content)
         source_file = _sanitize_pg_str(source_file) if source_file else source_file
         if source_file:
-            hash_input = source_file + str(chunk_index)
+            drawer_id = self._mining_drawer_id(wing, room, source_file, chunk_index)
         else:
-            hash_input = content
-        drawer_id = f"drawer_{wing}_{room}_{hashlib.md5(hash_input.encode()).hexdigest()[:16]}"
+            digest = hashlib.md5(content.encode()).hexdigest()[:16]
+            drawer_id = f"drawer_{wing}_{room}_{digest}"
         emb = embed([content])[0]
         # Stamp source_mtime on mining drawers so file_already_mined() can
         # detect when a file has been edited since it was last mined. We
@@ -284,7 +440,7 @@ class PalaceDB:
             mtime = os.path.getmtime(source_file)
         except OSError:
             return None
-        sentinel_id = f"_reg_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
+        sentinel_id = self._registry_sentinel_id(source_file)
         meta = json.dumps({"source_mtime": mtime, "ingest_mode": "registry"})
         cur = self.conn().cursor()
         try:
@@ -311,37 +467,47 @@ class PalaceDB:
             self.conn().rollback()
             raise
 
-    def file_already_mined(self, source_file):
+    def file_already_mined(self, source_file, ingest_mode=None, extract_mode=None):
         """Fast check: has this file been filed before AND is unchanged?
 
-        We compare the file's current mtime against ``source_mtime`` stored in
-        the drawer's metadata. Returns False (re-mine needed) when:
-          - no prior drawer exists for this source_file,
-          - no source_mtime was stored (first-time import from a pre-mtime build), or
-          - the file's current mtime differs from the stored one.
+        Strict variant (adapted from upstream PR #2088): EVERY drawer in the
+        file's mining scope must carry the current on-disk mtime, not just an
+        arbitrary one (the old LIMIT 1 probe). A partial state — e.g. rows
+        left by a pre-atomic-replace mine that died mid-file, or stale tail
+        rows from a shrunk file — therefore reads as "not mined" and gets
+        cleaned up by the next replace_file_drawers() pass, instead of being
+        mistaken for a complete mine and skipped forever.
 
-        This is the second half of the port of upstream bf88daa: content-hash
-        / upsert semantics already let a modified file update its rows, but we
-        also need to stop the miner from short-circuiting modified files as
-        "already mined" at the scan stage.
+        The check is scoped by (ingest_mode, extract_mode) — see
+        _scope_clause — so convo extract modes don't invalidate each other's
+        freshness. The convo scope also counts the registry sentinel: a
+        0-chunk file is "mined" for any mode as long as the sentinel's mtime
+        is current.
+
+        Returns False (re-mine needed) when:
+          - no drawer exists in this file's scope,
+          - any scoped drawer lacks source_mtime (pre-mtime build), or
+          - any scoped drawer's stored mtime differs from the current one.
+
+        This keeps the bf88daa port's contract: upsert semantics let a
+        modified file update its rows, and this check stops the miner from
+        short-circuiting modified files as "already mined" at the scan stage.
         """
-        cur = self.conn().cursor()
-        cur.execute(
-            "SELECT metadata FROM drawers WHERE source_file = %s LIMIT 1",
-            (source_file,),
-        )
-        row = cur.fetchone()
-        if row is None:
-            return False
-        stored_meta = row[0] or {}
-        stored_mtime = stored_meta.get("source_mtime") if isinstance(stored_meta, dict) else None
-        if stored_mtime is None:
-            return False
         try:
             current_mtime = os.path.getmtime(source_file)
         except OSError:
             return False
-        return float(stored_mtime) == current_mtime
+        scope_sql, scope_params = self._scope_clause(
+            ingest_mode, extract_mode, include_registry=True
+        )
+        cur = self.conn().cursor()
+        cur.execute(
+            "SELECT bool_and(COALESCE((metadata->>'source_mtime')::float8 = %s, FALSE)) "
+            f"FROM drawers WHERE source_file = %s AND {scope_sql}",
+            (current_mtime, source_file, *scope_params),
+        )
+        row = cur.fetchone()
+        return bool(row and row[0])
 
     def get_drawers(self, where=None, limit=None, offset=0, include=None):
         """Get drawers with optional filters. Returns ChromaDB-compatible dict."""

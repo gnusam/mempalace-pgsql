@@ -310,6 +310,123 @@ def test_process_file_skips_machine_generated_long_lines():
         shutil.rmtree(tmpdir)
 
 
+class RecordingDB:
+    """Test double for PalaceDB exposing just what process_file touches."""
+
+    def __init__(self):
+        self.replace_calls = []
+
+    def file_already_mined(self, source_file, ingest_mode=None, extract_mode=None):
+        return False
+
+    def replace_file_drawers(
+        self,
+        wing,
+        chunks,
+        source_file,
+        agent="mempalace",
+        source_mtime=None,
+        ingest_mode=None,
+        extract_mode=None,
+    ):
+        self.replace_calls.append(
+            {
+                "wing": wing,
+                "chunks": chunks,
+                "source_file": source_file,
+                "source_mtime": source_mtime,
+            }
+        )
+        return [f"id_{c['chunk_index']}" for c in chunks]
+
+
+def test_process_file_files_all_chunks_via_one_atomic_replace():
+    """All of a file's chunks go through a single replace_file_drawers call
+    (one transaction), not per-chunk autocommitted inserts — a mine killed
+    mid-file must leave the previous state intact (upstream PR #2088)."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+        source = project_root / "code.py"
+        write_file(source, "def hello():\n    return 'world'\n" * 40)
+
+        db = RecordingDB()
+        rooms = [{"name": "general", "description": "general", "keywords": []}]
+        count, room = process_file(
+            filepath=source,
+            project_path=project_root,
+            db=db,
+            wing="test",
+            rooms=rooms,
+            agent="test",
+            dry_run=False,
+        )
+        assert len(db.replace_calls) == 1
+        assert count == len(db.replace_calls[0]["chunks"]) > 0
+        assert all(c["room"] == room for c in db.replace_calls[0]["chunks"])
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_process_file_stamps_read_time_mtime_not_a_later_restat(monkeypatch):
+    """The stored source_mtime must be the one captured with the read, not a
+    later os.path.getmtime() — a file appended to in between would otherwise
+    be stamped as current and its tail permanently skipped (upstream PR
+    #2088's TOCTOU gap)."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+        source = project_root / "session.md"
+        write_file(source, "some conversation content\n" * 40)
+        real_mtime = source.stat().st_mtime
+
+        # Any later re-stat would observe this bogus value instead.
+        monkeypatch.setattr(os.path, "getmtime", lambda path: real_mtime + 9999)
+
+        db = RecordingDB()
+        rooms = [{"name": "general", "description": "general", "keywords": []}]
+        process_file(
+            filepath=source,
+            project_path=project_root,
+            db=db,
+            wing="test",
+            rooms=rooms,
+            agent="test",
+            dry_run=False,
+        )
+        assert db.replace_calls[0]["source_mtime"] == real_mtime
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_process_file_purges_scope_when_content_yields_nothing():
+    """A file whose current content falls below the chunk minimum must purge
+    its old drawers on re-mine, not silently keep serving them (upstream PR
+    #2088's dangling-closet analog)."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+        source = project_root / "shrunk.md"
+        write_file(source, "tiny")
+
+        db = RecordingDB()
+        rooms = [{"name": "general", "description": "general", "keywords": []}]
+        count, room = process_file(
+            filepath=source,
+            project_path=project_root,
+            db=db,
+            wing="test",
+            rooms=rooms,
+            agent="test",
+            dry_run=False,
+        )
+        assert count == 0
+        assert len(db.replace_calls) == 1
+        assert db.replace_calls[0]["chunks"] == []
+    finally:
+        shutil.rmtree(tmpdir)
+
+
 def test_process_file_accepts_normal_line_lengths():
     """Sanity check: ordinary multi-line files still pass the line-length gate."""
     tmpdir = tempfile.mkdtemp()

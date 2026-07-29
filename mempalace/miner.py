@@ -463,14 +463,31 @@ def process_file(
     if not dry_run and file_already_mined(db, source_file):
         return 0, "general"
 
+    # Capture the mtime BEFORE reading so the stored value is paired with
+    # the content actually read: an append landing between the two leaves
+    # the stored mtime older than disk, so the next mine re-mines (safe).
+    # The old order — read here, os.path.getmtime() later inside add_drawer —
+    # could stamp drawers with an mtime covering content that was never
+    # chunked, permanently skipping the appended tail (upstream PR #2088).
     try:
+        source_mtime = filepath.stat().st_mtime
         content = filepath.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return 0, "general"
 
     content = content.strip()
-    if len(content) < MIN_CHUNK_SIZE:
+
+    # Empty-yield gates. On a re-mine these must still purge the scope's old
+    # drawers: a file whose current content yields nothing (shrunk below the
+    # chunk minimum, or rewritten as one minified blob) must not keep serving
+    # its old chunks (upstream PR #2088's dangling-closet analog).
+    def _purge_and_skip():
+        if not dry_run:
+            db.replace_file_drawers(wing, [], source_file, agent=agent, source_mtime=source_mtime)
         return 0, "general"
+
+    if len(content) < MIN_CHUNK_SIZE:
+        return _purge_and_skip()
 
     # Reject minified / machine-generated content by average line length.
     # Filename-based skip (SKIP_FILENAME_PATTERNS) catches the common cases;
@@ -478,7 +495,7 @@ def process_file(
     # (e.g. Symfony Intl CLDR data, which is one huge JSON object per file).
     line_count = content.count("\n") + 1
     if len(content) / line_count > MAX_AVG_LINE_LENGTH:
-        return 0, "general"
+        return _purge_and_skip()
 
     room = detect_room(filepath, content, rooms, project_path)
     chunks = chunk_text(content, source_file)
@@ -487,21 +504,20 @@ def process_file(
         print(f"    [DRY RUN] {filepath.name} → room:{room} ({len(chunks)} drawers)")
         return len(chunks), room
 
-    drawers_added = 0
-    for chunk in chunks:
-        added = add_drawer(
-            db=db,
-            wing=wing,
-            room=room,
-            content=chunk["content"],
-            source_file=source_file,
-            chunk_index=chunk["chunk_index"],
-            agent=agent,
-        )
-        if added:
-            drawers_added += 1
+    # One atomic replace per file: stale-row purge + all inserts commit
+    # together, so a mine killed mid-file leaves the previous state intact
+    # instead of a partial chunk set that file_already_mined() would accept
+    # as complete (upstream PR #2088, adapted — PostgreSQL transactionality
+    # replaces upstream's chunk_total completion marker).
+    filed_ids = db.replace_file_drawers(
+        wing,
+        [{"room": room, "content": c["content"], "chunk_index": c["chunk_index"]} for c in chunks],
+        source_file,
+        agent=agent,
+        source_mtime=source_mtime,
+    )
 
-    return drawers_added, room
+    return len(filed_ids), room
 
 
 # =============================================================================

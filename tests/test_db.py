@@ -470,6 +470,203 @@ class TestKGTemporalSemantics:
         assert tid is not None
 
 
+# ── Atomic per-file replace + strict scoped freshness ────────────────────
+# Adapted from upstream PR #2088 (re-mine safety gaps) and the over-match
+# lesson of PR #2089: one transaction per file, stale rows purged within
+# the mining scope only, and file_already_mined() requires EVERY scoped
+# drawer to carry the current mtime.
+
+
+class TestReplaceFileDrawers:
+    def _chunks(self, n, room="general"):
+        return [
+            {"room": room, "content": f"replace test chunk {i} " * 10, "chunk_index": i}
+            for i in range(n)
+        ]
+
+    def _count(self, db, source_file):
+        cur = db.conn().cursor()
+        cur.execute("SELECT COUNT(*) FROM drawers WHERE source_file = %s", (source_file,))
+        return cur.fetchone()[0]
+
+    def test_shrunk_remine_purges_stale_tail(self, db, tmp_path):
+        f = tmp_path / "shrink.md"
+        f.write_text("x")
+        src = str(f)
+        db.replace_file_drawers("test_replace", self._chunks(3), src, source_mtime=1000.0)
+        assert self._count(db, src) == 3
+        db.replace_file_drawers("test_replace", self._chunks(2), src, source_mtime=2000.0)
+        assert self._count(db, src) == 2, "stale tail chunk must be purged on re-mine"
+
+    def test_empty_chunkset_purges_scope(self, db, tmp_path):
+        f = tmp_path / "empty.md"
+        f.write_text("x")
+        src = str(f)
+        db.replace_file_drawers("test_replace", self._chunks(2), src, source_mtime=1000.0)
+        db.replace_file_drawers("test_replace", [], src, source_mtime=2000.0)
+        assert self._count(db, src) == 0, (
+            "a file whose content now yields nothing must stop serving old drawers"
+        )
+
+    def test_replace_preserves_other_scope_rows(self, db, tmp_path):
+        """The purge must not cross mining scopes — the over-match class of
+        upstream PR #2089, where a legacy catch-all rule deleted another
+        pass's drawers."""
+        f = tmp_path / "scoped.md"
+        f.write_text("x")
+        src = str(f)
+        db.add_drawer(
+            "test_replace",
+            "general",
+            "convo exchange drawer " * 5,
+            source_file=src,
+            chunk_index=99,
+            metadata={"ingest_mode": "convos", "extract_mode": "exchange"},
+        )
+        db.replace_file_drawers("test_replace", [], src, source_mtime=1000.0)
+        assert self._count(db, src) == 1, "project-scope purge deleted a convos-scope row"
+        db.replace_file_drawers(
+            "test_replace",
+            [],
+            src,
+            source_mtime=1000.0,
+            ingest_mode="convos",
+            extract_mode="general",
+        )
+        assert self._count(db, src) == 1, "general-mode purge deleted an exchange-mode row"
+        db.replace_file_drawers(
+            "test_replace",
+            [],
+            src,
+            source_mtime=1000.0,
+            ingest_mode="convos",
+            extract_mode="exchange",
+        )
+        assert self._count(db, src) == 0
+
+    def test_failed_replace_rolls_back_leaving_old_rows(self, db, tmp_path, monkeypatch):
+        """A mine that dies mid-file must leave the previous state fully
+        intact — no partial chunk set, no purged-but-not-replaced rows
+        (upstream PR #2088 gaps 1 and 3, solved here via transactionality)."""
+        import numpy as np
+
+        import mempalace.db as mdb
+
+        f = tmp_path / "atomic.md"
+        f.write_text("x")
+        src = str(f)
+        db.replace_file_drawers("test_replace", self._chunks(2), src, source_mtime=1000.0)
+
+        def bad_embed(texts):
+            # Second embedding has the wrong dimension → the second INSERT
+            # fails inside the transaction.
+            embs = [np.zeros(384, dtype=np.float32) for _ in texts]
+            embs[-1] = np.zeros(3, dtype=np.float32)
+            return embs
+
+        monkeypatch.setattr(mdb, "embed", bad_embed)
+        with pytest.raises(Exception):
+            db.replace_file_drawers("test_replace", self._chunks(3), src, source_mtime=2000.0)
+        db.reset()
+        assert self._count(db, src) == 2, (
+            "failed replace left a partial state instead of rolling back"
+        )
+
+    def test_replace_drops_registry_sentinel_when_chunks_land(self, db, tmp_path):
+        f = tmp_path / "was_empty.md"
+        f.write_text("now has real content")
+        src = str(f)
+        db.register_empty_file(src, "test_replace")
+        db.replace_file_drawers(
+            "test_replace", self._chunks(1), src, source_mtime=os.path.getmtime(src)
+        )
+        cur = db.conn().cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM drawers WHERE source_file = %s "
+            "AND metadata->>'ingest_mode' = 'registry'",
+            (src,),
+        )
+        assert cur.fetchone()[0] == 0, "stale 0-chunk sentinel must go once real chunks land"
+        assert db.file_already_mined(src) is True
+
+
+class TestFileAlreadyMinedStrict:
+    def test_partial_state_reads_as_not_mined(self, db, tmp_path):
+        """Rows left by a pre-atomic mine that died mid-file: some chunks
+        carry the current mtime, the tail is missing/stale. The old LIMIT 1
+        probe could accept that as fully mined (upstream PR #2088 gap 1)."""
+        f = tmp_path / "partial.md"
+        f.write_text("content")
+        src = str(f)
+        mtime = os.path.getmtime(src)
+        db.add_drawer(
+            "test_famined",
+            "general",
+            "fresh chunk " * 10,
+            source_file=src,
+            chunk_index=0,
+            metadata={"source_mtime": mtime},
+        )
+        assert db.file_already_mined(src) is True
+        db.add_drawer(
+            "test_famined",
+            "general",
+            "stale chunk " * 10,
+            source_file=src,
+            chunk_index=1,
+            metadata={"source_mtime": mtime - 999},
+        )
+        assert db.file_already_mined(src) is False, (
+            "a scoped drawer with a stale mtime must force a re-mine"
+        )
+
+    def test_scoped_by_extract_mode(self, db, tmp_path):
+        f = tmp_path / "modes.md"
+        f.write_text("content")
+        src = str(f)
+        mtime = os.path.getmtime(src)
+        db.add_drawer(
+            "test_famined",
+            "general",
+            "exchange drawer " * 10,
+            source_file=src,
+            chunk_index=0,
+            metadata={"ingest_mode": "convos", "extract_mode": "exchange", "source_mtime": mtime},
+        )
+        db.add_drawer(
+            "test_famined",
+            "decision",
+            "general-mode drawer " * 10,
+            source_file=src,
+            chunk_index=0,
+            metadata={
+                "ingest_mode": "convos",
+                "extract_mode": "general",
+                "source_mtime": mtime - 999,
+            },
+        )
+        assert db.file_already_mined(src, ingest_mode="convos", extract_mode="exchange") is True
+        assert db.file_already_mined(src, ingest_mode="convos", extract_mode="general") is False, (
+            "one mode's staleness must not be masked by the other mode's freshness"
+        )
+
+    def test_legacy_convo_rows_count_as_exchange(self, db, tmp_path):
+        f = tmp_path / "legacy.md"
+        f.write_text("content")
+        src = str(f)
+        mtime = os.path.getmtime(src)
+        db.add_drawer(
+            "test_famined",
+            "general",
+            "legacy convo drawer " * 10,
+            source_file=src,
+            chunk_index=0,
+            metadata={"ingest_mode": "convos", "source_mtime": mtime},
+        )
+        assert db.file_already_mined(src, ingest_mode="convos", extract_mode="exchange") is True
+        assert db.file_already_mined(src, ingest_mode="convos", extract_mode="general") is False
+
+
 # ── Battery-aware embedding device selection (no DB required) ────────────
 
 
