@@ -750,3 +750,25 @@ class TestDeviceSelection:
 
         monkeypatch.delenv("MEMPALACE_DEVICE", raising=False)
         assert mdb._select_device(cuda_available=False) == "cpu"
+
+
+# ── Search surface: round-trippable IDs ──────────────────────────────────
+
+
+class TestSearchSurface:
+    def test_search_memories_returns_round_trippable_drawer_id(self, db, monkeypatch):
+        """Every search hit must carry the stored drawer ID so results can
+        feed mempalace_delete_drawer / dedup flows directly (adapted from
+        upstream PR #2090 — previously hits carried no ID at all)."""
+        import mempalace.searcher as searcher_mod
+
+        monkeypatch.setattr(searcher_mod, "get_db", lambda: db)
+        drawer_id = db.add_drawer(
+            "test_searchsurface", "general", "the zanzibar quorum protocol design note " * 3
+        )
+        result = searcher_mod.search_memories(
+            "zanzibar quorum protocol", wing="test_searchsurface", n_results=3
+        )
+        assert result["results"], "expected at least one hit"
+        assert result["results"][0]["drawer_id"] == drawer_id
+        assert db.delete_drawer(drawer_id) is True

@@ -109,14 +109,19 @@ def search_memories(
             "hint": "Check that PostgreSQL is running and the palace has been mined.",
         }
 
+    ids = results["ids"][0]
     docs = results["documents"][0]
     metas = results["metadatas"][0]
     dists = results["distances"][0]
 
     hits = []
-    for doc, meta, dist in zip(docs, metas, dists):
+    for drawer_id, doc, meta, dist in zip(ids, docs, metas, dists):
         hits.append(
             {
+                # Round-trippable ID (adapted from upstream PR #2090): lets
+                # a search hit feed mempalace_delete_drawer / dedup flows
+                # directly. Previously hits carried no ID at all.
+                "drawer_id": drawer_id,
                 "text": doc,
                 "wing": meta.get("wing", "unknown"),
                 "room": meta.get("room", "unknown"),
