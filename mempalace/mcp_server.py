@@ -198,7 +198,9 @@ def tool_check_duplicate(content: str, threshold: float = 0.9):
         if results["ids"] and results["ids"][0]:
             for i, drawer_id in enumerate(results["ids"][0]):
                 dist = results["distances"][0][i]
-                similarity = round(1 - dist, 3)
+                # Cosine distance spans [0, 2]; clamp so far-away results
+                # report similarity 0 instead of a negative number.
+                similarity = round(max(0.0, 1 - dist), 3)
                 if similarity >= threshold:
                     meta = results["metadatas"][0][i]
                     doc = results["documents"][0][i]

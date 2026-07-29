@@ -366,3 +366,40 @@ def test_tools_list_returns_registered_tools():
         assert "name" in tool
         assert "description" in tool
         assert "inputSchema" in tool
+
+
+# ── Similarity clamp (port of upstream eef053d / f2bed92) ─────────────────
+
+
+def test_check_duplicate_clamps_negative_similarity(monkeypatch):
+    """Cosine distance spans [0, 2]; 1 - dist must not go negative."""
+
+    class _FarAwayDB:
+        def query(self, content, n_results=5, auto_detect=False):
+            return {
+                "ids": [["drawer_x"]],
+                "documents": [["totally unrelated"]],
+                "metadatas": [[{"wing": "w", "room": "r"}]],
+                "distances": [[1.8]],
+            }
+
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: _FarAwayDB())
+    result = mcp_server.tool_check_duplicate("some content", threshold=0.9)
+    assert result["is_duplicate"] is False
+    assert result["matches"] == []
+
+
+def test_check_duplicate_reports_zero_not_negative(monkeypatch):
+    class _FarAwayDB:
+        def query(self, content, n_results=5, auto_detect=False):
+            return {
+                "ids": [["drawer_x"]],
+                "documents": [["doc"]],
+                "metadatas": [[{"wing": "w", "room": "r"}]],
+                "distances": [[1.8]],
+            }
+
+    monkeypatch.setattr(mcp_server, "_get_db", lambda: _FarAwayDB())
+    # threshold 0 admits everything, exposing the reported similarity value
+    result = mcp_server.tool_check_duplicate("some content", threshold=0.0)
+    assert result["matches"][0]["similarity"] == 0.0
