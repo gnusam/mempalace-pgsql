@@ -238,6 +238,9 @@ def test_mine_convos_files_atomically_with_read_time_mtime(monkeypatch):
         def file_already_mined(self, source_file, ingest_mode=None, extract_mode=None):
             return False
 
+        def files_already_mined(self, file_mtimes, ingest_mode=None, extract_mode=None):
+            return set()
+
         def content_hash_exists(self, file_content_hash, exclude_source_file):
             return False
 

@@ -654,7 +654,25 @@ def mine(
     files_skipped = 0
     room_counts = defaultdict(int)
 
+    # One bulk freshness query for the whole scan instead of one round-trip
+    # per file (deferred candidate from the 2026-07-29 upstream audit) —
+    # on an already-mined project the per-file probes dominate scan time.
+    # process_file keeps its own per-file check as a cheap correctness
+    # backstop for the files that DO get processed.
+    fresh = set()
+    if not dry_run and files:
+        stats = []
+        for f in files:
+            try:
+                stats.append((str(f), f.stat().st_mtime))
+            except OSError:
+                continue
+        fresh = db.files_already_mined(stats)
+
     for i, filepath in enumerate(files, 1):
+        if not dry_run and str(filepath) in fresh:
+            files_skipped += 1
+            continue
         drawers, room = process_file(
             filepath=filepath,
             project_path=project_path,

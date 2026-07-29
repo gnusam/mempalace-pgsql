@@ -316,11 +316,23 @@ def mine_convos(
     files_skipped = 0
     room_counts = defaultdict(int)
 
+    # Bulk freshness pre-fetch: one query for the whole scan instead of one
+    # per transcript (see miner.mine / PalaceDB.files_already_mined).
+    fresh = set()
+    if not dry_run and files:
+        stats = []
+        for f in files:
+            try:
+                stats.append((str(f), f.stat().st_mtime))
+            except OSError:
+                continue
+        fresh = db.files_already_mined(stats, ingest_mode="convos", extract_mode=extract_mode)
+
     for i, filepath in enumerate(files, 1):
         source_file = str(filepath)
 
-        # Skip if already filed
-        if not dry_run and file_already_mined(db, source_file, extract_mode):
+        # Skip if already filed (bulk snapshot above)
+        if not dry_run and source_file in fresh:
             files_skipped += 1
             continue
 

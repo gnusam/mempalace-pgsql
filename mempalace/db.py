@@ -552,6 +552,47 @@ class PalaceDB:
         )
         return [(a, b, float(s)) for a, b, s in cur.fetchall()]
 
+    def files_already_mined(self, file_mtimes, ingest_mode=None, extract_mode=None):
+        """Bulk variant of file_already_mined: one query for a whole scan.
+
+        ``file_mtimes`` is a list of ``(source_file, current_mtime)`` pairs
+        (the caller stats each file once at scan time). Returns the set of
+        source_files whose scoped drawers ALL carry that mtime — the same
+        strict rule as file_already_mined, evaluated server-side with a
+        VALUES join instead of one round-trip per file (the deferred
+        "bulk already-mined pre-fetch" candidate from the 2026-07-29
+        upstream audit; on PG the per-file probes dominate scan time for
+        large already-mined projects).
+
+        A file whose mtime changes after this snapshot is simply mined (or
+        skipped) based on the snapshot — the same race window the per-file
+        check always had; the next run converges.
+        """
+        if not file_mtimes:
+            return set()
+        scope_sql, scope_params = self._scope_clause(
+            ingest_mode, extract_mode, include_registry=True
+        )
+        cur = self.conn().cursor()
+        if scope_params:
+            scope_sql = cur.mogrify(scope_sql, scope_params).decode()
+        rows = psycopg2.extras.execute_values(
+            cur,
+            f"""SELECT d.source_file
+                FROM drawers d
+                JOIN (VALUES %s) AS v(source_file, mtime)
+                  ON d.source_file = v.source_file
+                WHERE {scope_sql}
+                GROUP BY d.source_file
+                HAVING bool_and(
+                    COALESCE((d.metadata->>'source_mtime')::float8 = v.mtime::float8, FALSE)
+                )""",
+            [(str(f), float(m)) for f, m in file_mtimes],
+            page_size=500,
+            fetch=True,
+        )
+        return {r[0] for r in rows}
+
     def file_already_mined(self, source_file, ingest_mode=None, extract_mode=None):
         """Fast check: has this file been filed before AND is unchanged?
 

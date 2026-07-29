@@ -852,3 +852,65 @@ class TestFindDuplicates:
         assert "error" in mcp.tool_find_duplicates(threshold=1.5)
         assert "error" in mcp.tool_find_duplicates(max_drawers=1)
         assert "error" in mcp.tool_find_duplicates(threshold="not-a-number")
+
+
+# ── Bulk already-mined pre-fetch ─────────────────────────────────────────
+
+
+class TestFilesAlreadyMined:
+    def test_bulk_matches_per_file_semantics(self, db, tmp_path):
+        fresh_f = tmp_path / "fresh.md"
+        stale_f = tmp_path / "stale.md"
+        unknown_f = tmp_path / "unknown.md"
+        for f in (fresh_f, stale_f, unknown_f):
+            f.write_text("content")
+
+        fresh_mtime = os.path.getmtime(fresh_f)
+        db.add_drawer(
+            "test_bulkmined",
+            "general",
+            "fresh bulk drawer " * 8,
+            source_file=str(fresh_f),
+            chunk_index=0,
+            metadata={"source_mtime": fresh_mtime},
+        )
+        db.add_drawer(
+            "test_bulkmined",
+            "general",
+            "stale bulk drawer " * 8,
+            source_file=str(stale_f),
+            chunk_index=0,
+            metadata={"source_mtime": os.path.getmtime(stale_f) - 999},
+        )
+
+        pairs = [
+            (str(fresh_f), fresh_mtime),
+            (str(stale_f), os.path.getmtime(stale_f)),
+            (str(unknown_f), os.path.getmtime(unknown_f)),
+        ]
+        result = db.files_already_mined(pairs)
+        assert result == {str(fresh_f)}, (
+            "only the file whose every scoped drawer carries the current mtime may be skipped"
+        )
+        # Bulk must agree with the per-file check.
+        assert db.file_already_mined(str(fresh_f)) is True
+        assert db.file_already_mined(str(stale_f)) is False
+
+    def test_bulk_scoped_by_extract_mode(self, db, tmp_path):
+        f = tmp_path / "scoped_bulk.md"
+        f.write_text("content")
+        mtime = os.path.getmtime(f)
+        db.add_drawer(
+            "test_bulkmined",
+            "general",
+            "scoped bulk exchange drawer " * 6,
+            source_file=str(f),
+            chunk_index=0,
+            metadata={"ingest_mode": "convos", "extract_mode": "exchange", "source_mtime": mtime},
+        )
+        pairs = [(str(f), mtime)]
+        assert db.files_already_mined(pairs, ingest_mode="convos", extract_mode="exchange") == {
+            str(f)
+        }
+        assert db.files_already_mined(pairs, ingest_mode="convos", extract_mode="general") == set()
+        assert db.files_already_mined(pairs) == set(), "project scope must not see convo rows"
