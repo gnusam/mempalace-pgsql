@@ -107,6 +107,192 @@ def test_chunk_by_exchange_splits_oversize_exchange_across_drawers():
 # --- Upstream 87e8baf (PR #732): 0-chunk files get a sentinel ---
 
 
+def test_register_empty_file_purge_stale_removes_only_scoped_rows():
+    """When a file's content now yields nothing, its old drawers for THIS
+    extract mode must go (in the same transaction as the sentinel), while
+    other scopes' rows survive — upstream PR #2089's over-match class."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        f = Path(tmpdir) / "now_empty.jsonl"
+        f.write_text("hi\n", encoding="utf-8")
+        src = str(f)
+
+        db = PalaceDB(DATABASE_URL)
+        wing = "test_register_purge"
+        try:
+            db.add_drawer(
+                wing,
+                "general",
+                "old exchange drawer " * 10,
+                source_file=src,
+                chunk_index=0,
+                metadata={"ingest_mode": "convos", "extract_mode": "exchange"},
+            )
+            db.add_drawer(
+                wing,
+                "decision",
+                "general-mode drawer " * 10,
+                source_file=src,
+                chunk_index=0,
+                metadata={"ingest_mode": "convos", "extract_mode": "general"},
+            )
+            db.register_empty_file(src, wing=wing, purge_stale=True, extract_mode="exchange")
+            cur = db.conn().cursor()
+            cur.execute(
+                "SELECT metadata->>'extract_mode', metadata->>'ingest_mode' "
+                "FROM drawers WHERE source_file = %s",
+                (src,),
+            )
+            remaining = cur.fetchall()
+            modes = {r[1] for r in remaining}
+            assert ("exchange", "convos") not in [(r[0], r[1]) for r in remaining], (
+                "stale exchange-mode drawers must be purged"
+            )
+            assert ("general", "convos") in [(r[0], r[1]) for r in remaining], (
+                "the other extract mode's drawers must survive the purge"
+            )
+            assert "registry" in modes
+            assert db.file_already_mined(src, ingest_mode="convos", extract_mode="exchange")
+        finally:
+            cur = db.conn().cursor()
+            cur.execute("DELETE FROM drawers WHERE wing = %s", (wing,))
+            db.close()
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_register_empty_file_without_purge_keeps_existing_rows():
+    """The transient-failure path (normalize() raising) registers the
+    sentinel but must NOT delete mined data — a parse hiccup is not proof
+    the content is gone (upstream PR #2088's failed-purge lesson)."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        f = Path(tmpdir) / "hiccup.jsonl"
+        f.write_text("hi\n", encoding="utf-8")
+        src = str(f)
+
+        db = PalaceDB(DATABASE_URL)
+        wing = "test_register_keep"
+        try:
+            db.add_drawer(
+                wing,
+                "general",
+                "previously mined drawer " * 10,
+                source_file=src,
+                chunk_index=0,
+                metadata={"ingest_mode": "convos", "extract_mode": "exchange"},
+            )
+            db.register_empty_file(src, wing=wing)
+            cur = db.conn().cursor()
+            cur.execute(
+                "SELECT COUNT(*) FROM drawers WHERE source_file = %s "
+                "AND metadata->>'ingest_mode' = 'convos'",
+                (src,),
+            )
+            assert cur.fetchone()[0] == 1
+        finally:
+            cur = db.conn().cursor()
+            cur.execute("DELETE FROM drawers WHERE wing = %s", (wing,))
+            db.close()
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_register_empty_file_stores_caller_mtime_not_a_restat():
+    """The sentinel must carry the mtime captured with the read, not a fresh
+    getmtime() at register time (upstream PR #2088's TOCTOU gap)."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        f = Path(tmpdir) / "toctou.jsonl"
+        f.write_text("hi\n", encoding="utf-8")
+        src = str(f)
+
+        db = PalaceDB(DATABASE_URL)
+        wing = "test_register_mtime"
+        try:
+            db.register_empty_file(src, wing=wing, source_mtime=1234.5)
+            cur = db.conn().cursor()
+            cur.execute(
+                "SELECT metadata->>'source_mtime' FROM drawers WHERE source_file = %s",
+                (src,),
+            )
+            assert float(cur.fetchone()[0]) == 1234.5
+        finally:
+            cur = db.conn().cursor()
+            cur.execute("DELETE FROM drawers WHERE wing = %s", (wing,))
+            db.close()
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_mine_convos_files_atomically_with_read_time_mtime(monkeypatch):
+    """mine_convos must file each transcript through one scoped
+    replace_file_drawers call carrying the mtime captured before
+    normalize() read the file — session logs are appended to while being
+    mined (upstream PRs #2088/#2089)."""
+
+    class RecordingDB:
+        def __init__(self):
+            self.replace_calls = []
+
+        def file_already_mined(self, source_file, ingest_mode=None, extract_mode=None):
+            return False
+
+        def register_empty_file(self, *args, **kwargs):
+            raise AssertionError("should not be called: chunks exist")
+
+        def replace_file_drawers(
+            self,
+            wing,
+            chunks,
+            source_file,
+            agent="mempalace",
+            source_mtime=None,
+            ingest_mode=None,
+            extract_mode=None,
+        ):
+            self.replace_calls.append(
+                {
+                    "chunks": chunks,
+                    "source_mtime": source_mtime,
+                    "ingest_mode": ingest_mode,
+                    "extract_mode": extract_mode,
+                }
+            )
+            return [f"id_{c['chunk_index']}" for c in chunks]
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        f = Path(tmpdir) / "session.jsonl"
+        f.write_text("USER: hello\nAI: world\n" * 50, encoding="utf-8")
+        real_mtime = f.stat().st_mtime
+
+        db = RecordingDB()
+        monkeypatch.setattr(convo_miner, "get_db_instance", lambda palace_path=None: db)
+        monkeypatch.setattr(convo_miner, "normalize", lambda path: "USER: hello\nAI: world\n" * 50)
+        monkeypatch.setattr(
+            convo_miner,
+            "chunk_exchanges",
+            lambda content: [
+                {"content": "exchange one " * 20, "chunk_index": 0},
+                {"content": "exchange two " * 20, "chunk_index": 1},
+            ],
+        )
+        # Any later re-stat would observe this bogus value instead.
+        monkeypatch.setattr(os.path, "getmtime", lambda path: real_mtime + 9999)
+
+        mine_convos(tmpdir, palace_path=None, wing="test_convo_atomic")
+
+        assert len(db.replace_calls) == 1
+        call = db.replace_calls[0]
+        assert len(call["chunks"]) == 2
+        assert call["ingest_mode"] == "convos"
+        assert call["extract_mode"] == "exchange"
+        assert call["source_mtime"] == real_mtime
+    finally:
+        shutil.rmtree(tmpdir)
+
+
 def test_register_empty_file_makes_file_already_mined_true():
     """A file that produces zero chunks must register a no-embedding sentinel
     so file_already_mined() returns True on the next mine run."""

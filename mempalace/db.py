@@ -423,7 +423,16 @@ class PalaceDB:
             self.conn().rollback()
             raise
 
-    def register_empty_file(self, source_file, wing, agent="mempalace"):
+    def register_empty_file(
+        self,
+        source_file,
+        wing,
+        agent="mempalace",
+        source_mtime=None,
+        purge_stale=False,
+        ingest_mode="convos",
+        extract_mode=None,
+    ):
         """Insert a no-embedding sentinel so file_already_mined() returns True
         for files that produce zero chunks (port of upstream 87e8baf, PR #732).
 
@@ -432,18 +441,41 @@ class PalaceDB:
         with a matching source_file AND a stored source_mtime, but 0-chunk
         early exits never write one.
 
-        Stores the file's mtime in metadata exactly as the regular mining
-        path does. The embedding column is left NULL so the sentinel doesn't
-        cost an embedding pass and is invisible to vector search.
+        ``source_mtime`` should be the mtime the caller captured with the
+        read (same TOCTOU rationale as replace_file_drawers); falls back to
+        a getmtime() probe for legacy callers.
+
+        With ``purge_stale`` the caller asserts the file's current content
+        genuinely yields nothing, so the scope's old drawers no longer have
+        a source: they are deleted in the SAME transaction as the sentinel
+        upsert (upstream PR #2089 — a rebuild must not leave rows its own
+        pass no longer owns, and a failed purge must roll back the sentinel
+        too, or the file would read as freshly mined while stale drawers
+        keep serving). Callers on possibly-transient failure paths (e.g. a
+        normalize() parse error) must leave ``purge_stale`` off: a hiccup
+        must not destroy mined data.
+
+        The embedding column is left NULL so the sentinel doesn't cost an
+        embedding pass and is invisible to vector search.
         """
-        try:
-            mtime = os.path.getmtime(source_file)
-        except OSError:
-            return None
+        if source_mtime is None:
+            try:
+                source_mtime = os.path.getmtime(source_file)
+            except OSError:
+                return None
         sentinel_id = self._registry_sentinel_id(source_file)
-        meta = json.dumps({"source_mtime": mtime, "ingest_mode": "registry"})
-        cur = self.conn().cursor()
+        meta = json.dumps({"source_mtime": source_mtime, "ingest_mode": "registry"})
+        conn = self.conn()
+        old_autocommit = conn.autocommit
+        conn.autocommit = False
         try:
+            cur = conn.cursor()
+            if purge_stale:
+                scope_sql, scope_params = self._scope_clause(ingest_mode, extract_mode)
+                cur.execute(
+                    f"DELETE FROM drawers WHERE source_file = %s AND {scope_sql}",
+                    (source_file, *scope_params),
+                )
             cur.execute(
                 """INSERT INTO drawers (id, wing, room, content, embedding,
                        source_file, chunk_index, added_by, filed_at, metadata)
@@ -462,10 +494,13 @@ class PalaceDB:
                     meta,
                 ),
             )
+            conn.commit()
             return sentinel_id
         except Exception:
-            self.conn().rollback()
+            conn.rollback()
             raise
+        finally:
+            conn.autocommit = old_autocommit
 
     def file_already_mined(self, source_file, ingest_mode=None, extract_mode=None):
         """Fast check: has this file been filed before AND is unchanged?

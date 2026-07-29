@@ -233,8 +233,11 @@ def get_db_instance(palace_path: str = None):
     return get_db()
 
 
-def file_already_mined(db, source_file: str) -> bool:
-    return db.file_already_mined(source_file)
+def file_already_mined(db, source_file: str, extract_mode: str = "exchange") -> bool:
+    # Scoped to this pass's extract mode so exchange-mode and general-mode
+    # drawers for the same transcript track their own freshness (see
+    # PalaceDB._scope_clause, upstream PR #2089's over-match class).
+    return db.file_already_mined(source_file, ingest_mode="convos", extract_mode=extract_mode)
 
 
 # =============================================================================
@@ -316,21 +319,46 @@ def mine_convos(
         source_file = str(filepath)
 
         # Skip if already filed
-        if not dry_run and file_already_mined(db, source_file):
+        if not dry_run and file_already_mined(db, source_file, extract_mode):
             files_skipped += 1
             continue
+
+        # Capture the mtime BEFORE normalize() reads the file, so the stored
+        # value is paired with the content actually chunked. Claude Code
+        # session logs are appended to while being mined — a later re-stat
+        # would stamp the drawers as covering the appended tail and the next
+        # mine would skip it forever (upstream PR #2088's TOCTOU gap).
+        try:
+            source_mtime = filepath.stat().st_mtime
+        except OSError:
+            source_mtime = None
 
         # Normalize format
         try:
             content = normalize(str(filepath))
         except (OSError, ValueError):
+            # Possibly transient failure: register the sentinel so the run
+            # doesn't re-read the file forever, but do NOT purge existing
+            # drawers — a parse hiccup must not destroy mined data
+            # (upstream PR #2088's failed-purge lesson).
             if not dry_run:
-                db.register_empty_file(source_file, wing, agent)
+                db.register_empty_file(source_file, wing, agent, source_mtime=source_mtime)
             continue
 
         if not content or len(content.strip()) < MIN_CHUNK_SIZE:
+            # Genuinely empty content: this pass's old drawers (if any) no
+            # longer have a source — purge them along with registering the
+            # sentinel (upstream PR #2089: a rebuild must not leave rows
+            # its own pass no longer owns).
             if not dry_run:
-                db.register_empty_file(source_file, wing, agent)
+                db.register_empty_file(
+                    source_file,
+                    wing,
+                    agent,
+                    source_mtime=source_mtime,
+                    purge_stale=True,
+                    extract_mode=extract_mode,
+                )
             continue
 
         # Chunk — either exchange pairs or general extraction
@@ -344,7 +372,14 @@ def mine_convos(
 
         if not chunks:
             if not dry_run:
-                db.register_empty_file(source_file, wing, agent)
+                db.register_empty_file(
+                    source_file,
+                    wing,
+                    agent,
+                    source_mtime=source_mtime,
+                    purge_stale=True,
+                    extract_mode=extract_mode,
+                )
             continue
 
         # Detect room from content (general mode uses memory_type instead)
@@ -374,23 +409,34 @@ def mine_convos(
         if extract_mode != "general":
             room_counts[room] += 1
 
-        # File each chunk
-        drawers_added = 0
+        # File the whole transcript through one atomic replace: stale-row
+        # purge (scoped to this extract mode) and every insert commit
+        # together, so a mine killed mid-file leaves the previous state
+        # intact and re-chunked exchanges don't leave orphaned tail rows
+        # (upstream PRs #2088/#2089, adapted — see
+        # PalaceDB.replace_file_drawers).
+        payload = []
         for chunk in chunks:
             chunk_room = chunk.get("memory_type", room) if extract_mode == "general" else room
             if extract_mode == "general":
                 room_counts[chunk_room] += 1
-            result = db.add_drawer(
-                wing=wing,
-                room=chunk_room,
-                content=chunk["content"],
-                source_file=source_file,
-                chunk_index=chunk["chunk_index"],
-                agent=agent,
-                metadata={"ingest_mode": "convos", "extract_mode": extract_mode},
+            payload.append(
+                {
+                    "room": chunk_room,
+                    "content": chunk["content"],
+                    "chunk_index": chunk["chunk_index"],
+                }
             )
-            if result:
-                drawers_added += 1
+        filed_ids = db.replace_file_drawers(
+            wing,
+            payload,
+            source_file,
+            agent=agent,
+            source_mtime=source_mtime,
+            ingest_mode="convos",
+            extract_mode=extract_mode,
+        )
+        drawers_added = len(filed_ids)
 
         total_drawers += drawers_added
         print(f"  ✓ [{i:4}/{len(files)}] {filepath.name[:50]:50} +{drawers_added}")
