@@ -914,3 +914,85 @@ class TestFilesAlreadyMined:
         }
         assert db.files_already_mined(pairs, ingest_mode="convos", extract_mode="general") == set()
         assert db.files_already_mined(pairs) == set(), "project scope must not see convo rows"
+
+
+# ── Drawer CRUD tool batch (upstream tool parity) ────────────────────────
+
+
+class TestDrawerCrudTools:
+    def test_get_and_list_drawers(self, db, monkeypatch):
+        import mempalace.mcp_server as mcp
+
+        monkeypatch.setattr(mcp, "_get_db", lambda: db)
+        a = db.add_drawer("test_crud", "notes", "crud tool alpha drawer " * 5)
+        db.add_drawer("test_crud", "plans", "crud tool beta drawer " * 5)
+
+        got = mcp.tool_get_drawer(a)
+        assert got["drawer_id"] == a
+        assert "alpha" in got["content"]
+        assert "error" in mcp.tool_get_drawer("drawer_does_not_exist")
+
+        listed = mcp.tool_list_drawers(wing="test_crud", limit=1)
+        assert listed["total"] == 2
+        assert listed["count"] == 1
+        page2 = mcp.tool_list_drawers(wing="test_crud", limit=1, offset=1)
+        assert page2["drawers"][0]["drawer_id"] != listed["drawers"][0]["drawer_id"]
+
+    def test_list_drawers_date_window(self, db, monkeypatch):
+        import mempalace.mcp_server as mcp
+
+        monkeypatch.setattr(mcp, "_get_db", lambda: db)
+        old = db.add_drawer("test_crud_dates", "notes", "ancient crud drawer " * 5)
+        db.add_drawer("test_crud_dates", "notes", "recent crud drawer " * 5)
+        cur = db.conn().cursor()
+        cur.execute("UPDATE drawers SET filed_at = '2026-01-10T09:00:00' WHERE id = %s", (old,))
+
+        res = mcp.tool_list_drawers(wing="test_crud_dates", before="2026-02-01")
+        assert [d["drawer_id"] for d in res["drawers"]] == [old]
+        assert res["total"] == 1
+        assert "error" in mcp.tool_list_drawers(since="not-a-date")
+        assert "error" in mcp.tool_list_drawers(since="2026-03-01", before="2026-02-01")
+
+    def test_update_drawer_replace_append_and_move(self, db, monkeypatch):
+        import mempalace.mcp_server as mcp
+
+        monkeypatch.setattr(mcp, "_get_db", lambda: db)
+        d = db.add_drawer("test_crud_upd", "notes", "original update drawer body " * 5)
+
+        assert mcp.tool_update_drawer(d, content="replaced body entirely " * 5)["success"]
+        assert "replaced body" in mcp.tool_get_drawer(d)["content"]
+
+        assert mcp.tool_update_drawer(d, content="appended tail line", append=True)["success"]
+        got = mcp.tool_get_drawer(d)["content"]
+        assert "replaced body" in got and got.endswith("appended tail line")
+
+        assert mcp.tool_update_drawer(d, room="archive")["success"]
+        assert mcp.tool_get_drawer(d)["metadata"]["room"] == "archive"
+
+        assert mcp.tool_update_drawer(d)["noop"] is True
+        assert "error" in mcp.tool_update_drawer(d, append=True)
+        assert mcp.tool_update_drawer("nope", content="x")["success"] is False
+
+    def test_delete_by_source_dry_run_then_commit(self, db, monkeypatch):
+        import mempalace.mcp_server as mcp
+
+        monkeypatch.setattr(mcp, "_get_db", lambda: db)
+        src = "/fake/eval/results_bench.jsonl"
+        db.add_drawer(
+            "test_crud_del", "notes", "bench noise one " * 5, source_file=src, chunk_index=0
+        )
+        db.add_drawer(
+            "test_crud_del", "plans", "bench noise two " * 5, source_file=src, chunk_index=1
+        )
+        keep = db.add_drawer("test_crud_del", "notes", "real content kept " * 5)
+
+        preview = mcp.tool_delete_by_source(src)
+        assert preview["dry_run"] is True
+        assert preview["matched"] == 2
+        assert preview["deleted"] == 0
+        assert db.count(where={"wing": "test_crud_del"}) == 3, "dry run must not delete"
+
+        result = mcp.tool_delete_by_source(src, dry_run=False)
+        assert result["deleted"] == 2
+        assert db.drawer_exists(keep) is True
+        assert "error" in mcp.tool_delete_by_source("   ")

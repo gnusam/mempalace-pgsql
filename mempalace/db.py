@@ -635,9 +635,23 @@ class PalaceDB:
         row = cur.fetchone()
         return bool(row and row[0])
 
-    def get_drawers(self, where=None, limit=None, offset=0, include=None):
+    @staticmethod
+    def _date_window_clauses(clauses, params, since, before):
+        """Append filed_at bounds (since inclusive, before exclusive) to a
+        WHERE fragment. Shared by query/get_drawers/count (upstream PR #2000
+        semantics)."""
+        if since:
+            clauses = f"{clauses} AND filed_at >= %s" if clauses else "filed_at >= %s"
+            params.append(since)
+        if before:
+            clauses = f"{clauses} AND filed_at < %s" if clauses else "filed_at < %s"
+            params.append(before)
+        return clauses, params
+
+    def get_drawers(self, where=None, limit=None, offset=0, include=None, since=None, before=None):
         """Get drawers with optional filters. Returns ChromaDB-compatible dict."""
         clauses, params = self._build_where(where)
+        clauses, params = self._date_window_clauses(clauses, params, since, before)
         sql = "SELECT id, wing, room, content, source_file, chunk_index, added_by, filed_at, metadata FROM drawers"
         if clauses:
             sql += f" WHERE {clauses}"
@@ -792,13 +806,66 @@ class PalaceDB:
         cur.execute("DELETE FROM drawers WHERE id = %s", (drawer_id,))
         return cur.rowcount > 0
 
+    def update_drawer(self, drawer_id, content=None, wing=None, room=None):
+        """Update a drawer's content and/or wing/room in place.
+
+        Content changes re-embed (same model/path as add_drawer) and are
+        sanitized for PG. The drawer keeps its ID — for mining drawers the
+        ID encodes the original wing/room, but the ID is only a key; search
+        and filters read the columns. Returns True when a row was updated.
+        Adapted from upstream tool_update_drawer for the PG backend.
+        """
+        sets, params = [], []
+        if content is not None:
+            content = _sanitize_pg_str(content)
+            sets += ["content = %s", "embedding = %s"]
+            params += [content, embed([content])[0]]
+        if wing is not None:
+            sets.append("wing = %s")
+            params.append(wing)
+        if room is not None:
+            sets.append("room = %s")
+            params.append(room)
+        if not sets:
+            return False
+        cur = self.conn().cursor()
+        cur.execute(
+            f"UPDATE drawers SET {', '.join(sets)} WHERE id = %s",
+            (*params, drawer_id),
+        )
+        return cur.rowcount > 0
+
+    def delete_by_source(self, source_file, dry_run=True):
+        """Bulk-delete every drawer whose source_file matches exactly.
+
+        Adapted from upstream tool_delete_by_source (#1722 — benchmark/eval
+        dumps mined into a real wing drowning out semantic search). Dry-run
+        by default: reports the match count and the distinct (wing, room)
+        pairs so the caller confirms the blast radius before committing.
+        """
+        source_file = _sanitize_pg_str(source_file)
+        cur = self.conn().cursor()
+        cur.execute(
+            "SELECT wing, room, COUNT(*) FROM drawers WHERE source_file = %s "
+            "GROUP BY wing, room ORDER BY COUNT(*) DESC",
+            (source_file,),
+        )
+        rows = cur.fetchall()
+        match_count = sum(r[2] for r in rows)
+        sample = [{"wing": r[0], "room": r[1], "drawers": r[2]} for r in rows[:20]]
+        if dry_run or match_count == 0:
+            return {"matched": match_count, "locations": sample, "deleted": 0}
+        cur.execute("DELETE FROM drawers WHERE source_file = %s", (source_file,))
+        return {"matched": match_count, "locations": sample, "deleted": cur.rowcount}
+
     def drawer_exists(self, drawer_id):
         cur = self.conn().cursor()
         cur.execute("SELECT 1 FROM drawers WHERE id = %s", (drawer_id,))
         return cur.fetchone() is not None
 
-    def count(self, where=None):
+    def count(self, where=None, since=None, before=None):
         clauses, params = self._build_where(where)
+        clauses, params = self._date_window_clauses(clauses, params, since, before)
         sql = "SELECT COUNT(*) FROM drawers"
         if clauses:
             sql += f" WHERE {clauses}"

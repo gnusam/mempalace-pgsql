@@ -12,10 +12,14 @@ Tools (read):
   mempalace_search          — semantic search, optional wing/room/date filter
   mempalace_check_duplicate — check if content already exists before filing
   mempalace_find_duplicates — cluster near-duplicate drawers (read-only audit)
+  mempalace_get_drawer      — fetch one drawer by ID
+  mempalace_list_drawers    — paginated listing with wing/room/date filters
 
 Tools (write):
   mempalace_add_drawer      — file verbatim content into a wing/room
+  mempalace_update_drawer   — replace/append content, move wing/room
   mempalace_delete_drawer   — remove a drawer by ID
+  mempalace_delete_by_source — bulk-delete a source file's drawers (dry-run default)
 """
 
 import argparse
@@ -203,6 +207,128 @@ def tool_search(
         since=since,
         before=before,
     )
+
+
+def tool_get_drawer(drawer_id: str):
+    """Fetch a single drawer by ID (adapted from upstream tool_get_drawer)."""
+    drawer_id = _normalize_optional_filter(drawer_id)
+    if not drawer_id:
+        return {"error": "drawer_id is required"}
+    db = _get_db()
+    res = db.get_drawers(where={"id": drawer_id}, limit=1)
+    if not res["ids"]:
+        return {"error": f"Drawer not found: {drawer_id}"}
+    return {
+        "drawer_id": res["ids"][0],
+        "content": res["documents"][0],
+        "metadata": res["metadatas"][0],
+    }
+
+
+def tool_list_drawers(
+    wing: str = None,
+    room: str = None,
+    since: str = None,
+    before: str = None,
+    limit: int = 20,
+    offset: int = 0,
+):
+    """List drawers with pagination and optional wing/room/date filters.
+
+    Adapted from upstream tool_list_drawers — the date window runs as SQL
+    bounds on filed_at (since inclusive, before exclusive) instead of
+    upstream's client-side post-filter.
+    """
+    wing = _normalize_optional_filter(wing)
+    room = _normalize_optional_filter(room)
+    try:
+        since = sanitize_iso_date(_normalize_optional_filter(since), "since")
+        before = sanitize_iso_date(_normalize_optional_filter(before), "before")
+        limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
+    except (TypeError, ValueError) as e:
+        return {"error": str(e)}
+    if since and before and before <= since:
+        return {"error": f"before ({before}) must be after since ({since})"}
+
+    where = None
+    if wing and room:
+        where = {"$and": [{"wing": wing}, {"room": room}]}
+    elif wing:
+        where = {"wing": wing}
+    elif room:
+        where = {"room": room}
+
+    db = _get_db()
+    res = db.get_drawers(where=where, limit=limit, offset=offset, since=since, before=before)
+    total = db.count(where=where, since=since, before=before)
+    drawers = [
+        {"drawer_id": i, "content": doc, "metadata": meta}
+        for i, doc, meta in zip(res["ids"], res["documents"], res["metadatas"])
+    ]
+    return {
+        "drawers": drawers,
+        "total": total,
+        "count": len(drawers),
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+def tool_update_drawer(
+    drawer_id: str, content: str = None, wing: str = None, room: str = None, append: bool = False
+):
+    """Update a drawer's content and/or wing/room.
+
+    Adapted from upstream tool_update_drawer, plus the ``append`` flag from
+    upstream PR #1762 by @fkberthold: append concatenates the new content
+    after the existing text (blank-line separated) instead of replacing it.
+    Content changes re-embed.
+    """
+    drawer_id = _normalize_optional_filter(drawer_id)
+    if not drawer_id:
+        return {"error": "drawer_id is required"}
+    content = _normalize_optional_filter(content)
+    wing = _normalize_optional_filter(wing)
+    room = _normalize_optional_filter(room)
+    if append and content is None:
+        return {"error": "append=true requires content"}
+    if content is None and wing is None and room is None:
+        return {"success": True, "drawer_id": drawer_id, "noop": True}
+
+    db = _get_db()
+    if append:
+        existing = db.get_drawers(where={"id": drawer_id}, limit=1)
+        if not existing["ids"]:
+            return {"success": False, "error": f"Drawer not found: {drawer_id}"}
+        content = f"{existing['documents'][0].rstrip()}\n\n{content}"
+
+    updated = db.update_drawer(drawer_id, content=content, wing=wing, room=room)
+    if not updated:
+        return {"success": False, "error": f"Drawer not found: {drawer_id}"}
+    return {
+        "success": True,
+        "drawer_id": drawer_id,
+        "appended": bool(append),
+        "content_changed": content is not None,
+    }
+
+
+def tool_delete_by_source(source_file: str, dry_run: bool = True):
+    """Bulk-delete every drawer mined from one source file.
+
+    Adapted from upstream tool_delete_by_source (#1722). Dry-run by default:
+    reports the match count and where the hits live; pass dry_run=false to
+    commit (irreversible).
+    """
+    if not isinstance(source_file, str) or not source_file.strip():
+        return {"success": False, "error": "source_file must be a non-empty string"}
+    db = _get_db()
+    result = db.delete_by_source(source_file.strip(), dry_run=bool(dry_run))
+    result["dry_run"] = bool(dry_run)
+    if dry_run and result["matched"]:
+        result["hint"] = "Pass dry_run=false to delete these drawers (irreversible)."
+    return result
 
 
 def tool_find_duplicates(
@@ -744,6 +870,77 @@ TOOLS = {
             "required": ["query"],
         },
         "handler": tool_search,
+    },
+    "mempalace_get_drawer": {
+        "description": "Fetch a single drawer (content + metadata) by its ID",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "drawer_id": {"type": "string", "description": "Drawer ID"},
+            },
+            "required": ["drawer_id"],
+        },
+        "handler": tool_get_drawer,
+    },
+    "mempalace_list_drawers": {
+        "description": "List drawers newest-first with pagination and optional wing/room/date filters",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "wing": {"type": "string", "description": "Filter by wing (optional)"},
+                "room": {"type": "string", "description": "Filter by room (optional)"},
+                "since": {
+                    "type": "string",
+                    "description": "Only drawers filed on/after this date, YYYY-MM-DD (optional)",
+                },
+                "before": {
+                    "type": "string",
+                    "description": "Only drawers filed strictly before this date, YYYY-MM-DD (optional)",
+                },
+                "limit": {"type": "integer", "description": "Page size, max 100 (default 20)"},
+                "offset": {"type": "integer", "description": "Pagination offset (default 0)"},
+            },
+        },
+        "handler": tool_list_drawers,
+    },
+    "mempalace_update_drawer": {
+        "description": (
+            "Update a drawer's content and/or wing/room. append=true adds the new "
+            "content after the existing text instead of replacing it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "drawer_id": {"type": "string", "description": "Drawer ID"},
+                "content": {"type": "string", "description": "New content (optional)"},
+                "wing": {"type": "string", "description": "New wing (optional)"},
+                "room": {"type": "string", "description": "New room (optional)"},
+                "append": {
+                    "type": "boolean",
+                    "description": "Append content instead of replacing (default false)",
+                },
+            },
+            "required": ["drawer_id"],
+        },
+        "handler": tool_update_drawer,
+    },
+    "mempalace_delete_by_source": {
+        "description": (
+            "Bulk-delete every drawer mined from one source file. Dry-run by default: "
+            "reports match count and locations; dry_run=false commits (irreversible)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_file": {"type": "string", "description": "Exact stored source_file value"},
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Preview only when true (default true)",
+                },
+            },
+            "required": ["source_file"],
+        },
+        "handler": tool_delete_by_source,
     },
     "mempalace_find_duplicates": {
         "description": (
