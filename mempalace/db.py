@@ -524,6 +524,34 @@ class PalaceDB:
         )
         return cur.fetchone() is not None
 
+    def find_duplicate_pairs(self, where=None, similarity_threshold=0.9, max_drawers=2000):
+        """Return (id_a, id_b, similarity) pairs of near-duplicate drawers.
+
+        Adapted from upstream PR #1951 (read-only find_duplicates tool):
+        upstream probes each drawer's nearest neighbors through the backend
+        API; PostgreSQL lets us do one bounded self-join with the pgvector
+        cosine operator instead. The scope is capped at ``max_drawers``
+        most-recent rows (a full self-join over a 275k palace would be
+        quadratic), so on large scopes this is a rolling-window audit, not
+        an exhaustive one — callers see the cap in the tool response.
+        Registry sentinels (embedding IS NULL) are naturally excluded.
+        """
+        clauses, params = self._build_where(where)
+        scope_sql = "SELECT id, embedding FROM drawers WHERE embedding IS NOT NULL"
+        if clauses:
+            scope_sql += f" AND {clauses}"
+        scope_sql += " ORDER BY filed_at DESC LIMIT %s"
+        cur = self.conn().cursor()
+        cur.execute(
+            f"""WITH scope AS ({scope_sql})
+                SELECT a.id, b.id, 1 - (a.embedding <=> b.embedding) AS sim
+                FROM scope a JOIN scope b ON a.id < b.id
+                WHERE 1 - (a.embedding <=> b.embedding) >= %s
+                ORDER BY sim DESC""",
+            (*params, int(max_drawers), float(similarity_threshold)),
+        )
+        return [(a, b, float(s)) for a, b, s in cur.fetchall()]
+
     def file_already_mined(self, source_file, ingest_mode=None, extract_mode=None):
         """Fast check: has this file been filed before AND is unchanged?
 

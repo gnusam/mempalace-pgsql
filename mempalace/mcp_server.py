@@ -9,8 +9,9 @@ Tools (read):
   mempalace_list_wings      — all wings with drawer counts
   mempalace_list_rooms      — rooms within a wing
   mempalace_get_taxonomy    — full wing → room → count tree
-  mempalace_search          — semantic search, optional wing/room filter
+  mempalace_search          — semantic search, optional wing/room/date filter
   mempalace_check_duplicate — check if content already exists before filing
+  mempalace_find_duplicates — cluster near-duplicate drawers (read-only audit)
 
 Tools (write):
   mempalace_add_drawer      — file verbatim content into a wing/room
@@ -202,6 +203,109 @@ def tool_search(
         since=since,
         before=before,
     )
+
+
+def tool_find_duplicates(
+    wing: str = None,
+    room: str = None,
+    threshold: float = 0.9,
+    max_drawers: int = 2000,
+    max_clusters: int = 20,
+):
+    """Read-only near-duplicate audit (adapted from upstream PR #1951).
+
+    Clusters drawers whose pairwise cosine similarity meets ``threshold``
+    via union-find over PalaceDB.find_duplicate_pairs. Never deletes —
+    results feed a human (or a follow-up mempalace_delete_drawer call).
+    """
+    wing = _normalize_optional_filter(wing)
+    room = _normalize_optional_filter(room)
+    try:
+        threshold = float(threshold)
+        max_drawers = int(max_drawers)
+        max_clusters = int(max_clusters)
+    except (TypeError, ValueError) as e:
+        return {"error": str(e)}
+    if not 0.0 <= threshold <= 1.0:
+        return {"error": "threshold must be a similarity between 0 and 1"}
+    if max_drawers < 2 or max_clusters < 1:
+        return {"error": "max_drawers must be >= 2 and max_clusters >= 1"}
+
+    where = None
+    if wing and room:
+        where = {"$and": [{"wing": wing}, {"room": room}]}
+    elif wing:
+        where = {"wing": wing}
+    elif room:
+        where = {"room": room}
+
+    db = _get_db()
+    pairs = db.find_duplicate_pairs(
+        where=where, similarity_threshold=threshold, max_drawers=max_drawers
+    )
+
+    # Union-find over the pair graph (upstream's clustering approach).
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    min_sim = {}
+    for a, b, sim in pairs:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+        root = find(ra)
+        min_sim[root] = min(min_sim.get(root, 1.0), sim)
+
+    groups = {}
+    for drawer_id in parent:
+        groups.setdefault(find(drawer_id), set()).add(drawer_id)
+
+    clusters = sorted(groups.values(), key=len, reverse=True)[:max_clusters]
+
+    # Fetch previews for the clustered drawers in one query.
+    all_ids = [i for members in clusters for i in members]
+    previews = {}
+    if all_ids:
+        cur = db.conn().cursor()
+        cur.execute(
+            "SELECT id, wing, room, LEFT(content, 120) FROM drawers WHERE id = ANY(%s)",
+            (all_ids,),
+        )
+        for i, w, r, c in cur.fetchall():
+            previews[i] = {"wing": w, "room": r, "preview": c}
+
+    result_clusters = []
+    for members in clusters:
+        root = find(next(iter(members)))
+        result_clusters.append(
+            {
+                "size": len(members),
+                "min_similarity": round(min_sim.get(root, 1.0), 3),
+                "drawers": [{"drawer_id": i, **previews.get(i, {})} for i in sorted(members)],
+            }
+        )
+
+    return {
+        "clusters": result_clusters,
+        "params": {
+            "wing": wing,
+            "room": room,
+            "threshold": threshold,
+            "max_drawers": max_drawers,
+            "max_clusters": max_clusters,
+        },
+        "note": (
+            "Scope capped at the most recent max_drawers rows — on larger "
+            "scopes this is a rolling-window audit, not exhaustive. "
+            "Read-only: pair with mempalace_delete_drawer to act."
+        ),
+    }
 
 
 def tool_check_duplicate(content: str, threshold: float = 0.9):
@@ -640,6 +744,32 @@ TOOLS = {
             "required": ["query"],
         },
         "handler": tool_search,
+    },
+    "mempalace_find_duplicates": {
+        "description": (
+            "Find clusters of near-duplicate drawers (read-only audit). "
+            "Scope with wing/room; pair with mempalace_delete_drawer to clean up."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "wing": {"type": "string", "description": "Restrict to one wing (optional)"},
+                "room": {"type": "string", "description": "Restrict to one room (optional)"},
+                "threshold": {
+                    "type": "number",
+                    "description": "Cosine similarity floor, 0-1 (default 0.9)",
+                },
+                "max_drawers": {
+                    "type": "integer",
+                    "description": "Most-recent rows examined (default 2000)",
+                },
+                "max_clusters": {
+                    "type": "integer",
+                    "description": "Max clusters returned, largest first (default 20)",
+                },
+            },
+        },
+        "handler": tool_find_duplicates,
     },
     "mempalace_check_duplicate": {
         "description": "Check if content already exists in the palace before filing",

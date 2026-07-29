@@ -813,3 +813,42 @@ class TestSearchSurface:
         )
         ids = hits["ids"][0]
         assert ids == [old_id]
+
+
+# ── Near-duplicate audit (upstream PR #1951, adapted) ────────────────────
+
+
+class TestFindDuplicates:
+    def test_find_duplicate_pairs_and_clustering(self, db):
+        import mempalace.mcp_server as mcp
+
+        a = db.add_drawer(
+            "test_dupaudit", "notes", "The deployment meeting is scheduled for noon on Friday."
+        )
+        b = db.add_drawer(
+            "test_dupaudit", "plans", "The deployment meeting is scheduled for noon on Friday!"
+        )
+        c = db.add_drawer(
+            "test_dupaudit", "notes", "Recipe: fold the egg whites gently into the batter."
+        )
+
+        pairs = db.find_duplicate_pairs(where={"wing": "test_dupaudit"}, similarity_threshold=0.9)
+        pair_ids = {frozenset((x, y)) for x, y, _ in pairs}
+        assert frozenset((a, b)) in pair_ids
+        assert all(c not in p for p in pair_ids), "unrelated drawer must not pair"
+
+        result = mcp.tool_find_duplicates(wing="test_dupaudit", threshold=0.9)
+        assert result["clusters"], "expected one duplicate cluster"
+        top = result["clusters"][0]
+        assert top["size"] == 2
+        member_ids = {d["drawer_id"] for d in top["drawers"]}
+        assert member_ids == {a, b}
+        assert top["min_similarity"] >= 0.9
+        assert all("preview" in d for d in top["drawers"])
+
+    def test_find_duplicates_validates_params(self):
+        import mempalace.mcp_server as mcp
+
+        assert "error" in mcp.tool_find_duplicates(threshold=1.5)
+        assert "error" in mcp.tool_find_duplicates(max_drawers=1)
+        assert "error" in mcp.tool_find_duplicates(threshold="not-a-number")
