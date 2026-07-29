@@ -601,7 +601,7 @@ class PalaceDB:
 
         return {"ids": ids, "documents": documents, "metadatas": metadatas}
 
-    def query(self, query_text, n_results=5, where=None, auto_detect=True):
+    def query(self, query_text, n_results=5, where=None, auto_detect=True, since=None, before=None):
         """Semantic search with optional automatic wing/room name matching.
 
         If ``auto_detect`` is true and no explicit filter is given, we inspect
@@ -609,6 +609,13 @@ class PalaceDB:
         that want to search the whole palace (e.g. duplicate detection, where
         a room name inside the content should NOT constrain the search) must
         pass ``auto_detect=False``.
+
+        ``since`` / ``before`` (adapted from upstream PR #2000) bound the
+        drawer's ``filed_at`` timestamp: ``since`` is inclusive from the
+        start of that day, ``before`` is exclusive of it (``YYYY-MM-DD``
+        strings — PostgreSQL casts them to that day's midnight). Like any
+        filter, a date window routes the query through the exact
+        sequential-scan path rather than HNSW.
         """
         # Auto-detect wing/room name in query when no filter specified
         if where is None and auto_detect:
@@ -616,6 +623,12 @@ class PalaceDB:
 
         emb = embed([query_text])[0]
         clauses, params = self._build_where(where)
+        if since:
+            clauses = f"{clauses} AND filed_at >= %s" if clauses else "filed_at >= %s"
+            params.append(since)
+        if before:
+            clauses = f"{clauses} AND filed_at < %s" if clauses else "filed_at < %s"
+            params.append(before)
 
         conn = self.conn()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)

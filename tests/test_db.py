@@ -752,7 +752,7 @@ class TestDeviceSelection:
         assert mdb._select_device(cuda_available=False) == "cpu"
 
 
-# ── Search surface: round-trippable IDs ──────────────────────────────────
+# ── Search surface: round-trippable IDs + date window ────────────────────
 
 
 class TestSearchSurface:
@@ -772,3 +772,44 @@ class TestSearchSurface:
         assert result["results"], "expected at least one hit"
         assert result["results"][0]["drawer_id"] == drawer_id
         assert db.delete_drawer(drawer_id) is True
+
+    def test_query_since_before_window(self, db):
+        """since is inclusive of that day, before exclusive (upstream PR
+        #2000, implemented as SQL bounds on filed_at)."""
+        old_id = db.add_drawer(
+            "test_datewin", "general", "ancient meeting notes about the quasar project " * 3
+        )
+        new_id = db.add_drawer(
+            "test_datewin", "general", "recent meeting notes about the quasar project " * 3
+        )
+        cur = db.conn().cursor()
+        cur.execute("UPDATE drawers SET filed_at = '2026-01-15T12:00:00' WHERE id = %s", (old_id,))
+
+        hits = db.query(
+            "quasar project meeting notes",
+            n_results=5,
+            where={"wing": "test_datewin"},
+            since="2026-02-01",
+        )
+        ids = hits["ids"][0]
+        assert new_id in ids and old_id not in ids
+
+        hits = db.query(
+            "quasar project meeting notes",
+            n_results=5,
+            where={"wing": "test_datewin"},
+            before="2026-02-01",
+        )
+        ids = hits["ids"][0]
+        assert old_id in ids and new_id not in ids
+
+        # since inclusive: the old drawer's own day
+        hits = db.query(
+            "quasar project meeting notes",
+            n_results=5,
+            where={"wing": "test_datewin"},
+            since="2026-01-15",
+            before="2026-01-16",
+        )
+        ids = hits["ids"][0]
+        assert ids == [old_id]

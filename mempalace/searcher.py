@@ -80,11 +80,21 @@ def search(
 
 
 def search_memories(
-    query: str, palace_path: str = None, wing: str = None, room: str = None, n_results: int = 5
+    query: str,
+    palace_path: str = None,
+    wing: str = None,
+    room: str = None,
+    n_results: int = 5,
+    since: str = None,
+    before: str = None,
 ) -> dict:
     """
     Programmatic search — returns a dict instead of printing.
     Used by the MCP server and other callers that need data.
+
+    ``since`` / ``before``: optional ``YYYY-MM-DD`` bounds on filed_at
+    (since inclusive, before exclusive — see PalaceDB.query, upstream
+    PR #2000).
     """
     db = get_db()
 
@@ -101,7 +111,7 @@ def search_memories(
         where = {"room": room}
 
     try:
-        results = db.query(query, n_results=n_results, where=where)
+        results = db.query(query, n_results=n_results, where=where, since=since, before=before)
     except Exception as e:
         logger.error("Search error: %s", e)
         return {
@@ -132,6 +142,6 @@ def search_memories(
 
     return {
         "query": query,
-        "filters": {"wing": wing, "room": room},
+        "filters": {"wing": wing, "room": room, "since": since, "before": before},
         "results": hits,
     }

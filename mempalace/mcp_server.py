@@ -173,15 +173,34 @@ def tool_get_taxonomy():
     return {"taxonomy": taxonomy}
 
 
-def tool_search(query: str, limit: int = 5, wing: str = None, room: str = None):
+def tool_search(
+    query: str,
+    limit: int = 5,
+    wing: str = None,
+    room: str = None,
+    since: str = None,
+    before: str = None,
+):
     wing = _normalize_optional_filter(wing)
     room = _normalize_optional_filter(room)
+    # Strict YYYY-MM-DD at the MCP boundary (upstream PR #2000), same
+    # validator as the KG temporal tools: a malformed date raises a clear
+    # error instead of silently matching nothing.
+    try:
+        since = sanitize_iso_date(_normalize_optional_filter(since), "since")
+        before = sanitize_iso_date(_normalize_optional_filter(before), "before")
+    except ValueError as e:
+        return {"error": str(e)}
+    if since and before and before <= since:
+        return {"error": f"before ({before}) must be after since ({since})"}
     return search_memories(
         query,
         palace_path=_config.palace_path,
         wing=wing,
         room=room,
         n_results=limit,
+        since=since,
+        before=before,
     )
 
 
@@ -609,6 +628,14 @@ TOOLS = {
                 "limit": {"type": "integer", "description": "Max results (default 5)"},
                 "wing": {"type": "string", "description": "Filter by wing (optional)"},
                 "room": {"type": "string", "description": "Filter by room (optional)"},
+                "since": {
+                    "type": "string",
+                    "description": "Only drawers filed on/after this date, YYYY-MM-DD (optional)",
+                },
+                "before": {
+                    "type": "string",
+                    "description": "Only drawers filed strictly before this date, YYYY-MM-DD (optional)",
+                },
             },
             "required": ["query"],
         },

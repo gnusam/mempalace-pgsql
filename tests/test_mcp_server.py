@@ -173,7 +173,7 @@ def test_tool_search_empty_wing_room_means_no_filter(monkeypatch):
     """
     captured = {}
 
-    def fake_search_memories(query, palace_path=None, wing=None, room=None, n_results=5):
+    def fake_search_memories(query, palace_path=None, wing=None, room=None, n_results=5, **kw):
         captured["wing"] = wing
         captured["room"] = room
         return {"results": []}
@@ -440,3 +440,49 @@ def test_kg_add_surfaces_inverted_interval_error(monkeypatch):
     result = mcp_server.tool_kg_add("Alice", "works_at", "Acme", valid_from="2026-02-01")
     assert result["success"] is False
     assert "before valid_from" in result["error"]
+
+
+# ── tool_search: since/before date window (upstream PR #2000) ──────────
+
+
+def test_tool_search_rejects_malformed_dates(monkeypatch):
+    called = {}
+
+    def fake_search_memories(*args, **kwargs):
+        called["yes"] = True
+        return {"results": []}
+
+    monkeypatch.setattr(mcp_server, "search_memories", fake_search_memories)
+    result = mcp_server.tool_search("anything", since="last week")
+    assert "error" in result
+    assert "since" in result["error"]
+    assert "yes" not in called, "malformed date must not reach the search layer"
+
+    result = mcp_server.tool_search("anything", before="2026/07/29")
+    assert "error" in result
+    assert "before" in result["error"]
+
+
+def test_tool_search_rejects_inverted_window(monkeypatch):
+    monkeypatch.setattr(mcp_server, "search_memories", lambda *a, **kw: {"results": []})
+    result = mcp_server.tool_search("q", since="2026-07-01", before="2026-06-01")
+    assert "error" in result
+
+
+def test_tool_search_passes_validated_window_through(monkeypatch):
+    seen = {}
+
+    def fake_search_memories(
+        query, palace_path=None, wing=None, room=None, n_results=5, since=None, before=None
+    ):
+        seen["since"] = since
+        seen["before"] = before
+        return {"results": []}
+
+    monkeypatch.setattr(mcp_server, "search_memories", fake_search_memories)
+    mcp_server.tool_search("q", since="2026-06-01", before="2026-07-01")
+    assert seen == {"since": "2026-06-01", "before": "2026-07-01"}
+
+    # Empty strings mean "no bound", exactly like wing/room (upstream #1097).
+    mcp_server.tool_search("q", since="", before="  ")
+    assert seen == {"since": None, "before": None}
