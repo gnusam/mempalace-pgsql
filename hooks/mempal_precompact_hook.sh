@@ -42,12 +42,18 @@
 #
 # === MEMPALACE CLI ===
 # The hook ALWAYS mines the active conversation transcript synchronously
-# before compaction (via `python3 -m mempalace mine <transcript-dir>
-# --mode convos`).  MEMPAL_DIR is an *additional*, optional target for
-# project files — it does not replace the conversation mine.
+# before compaction, routed through Docker via mine-wrapper.sh (the host
+# python has none of the PG-era dependencies — see the wrapper header).
+# MEMPAL_DIR is an *additional*, optional target for project files — it
+# does not replace the conversation mine.
 
 STATE_DIR="$HOME/.mempalace/hook_state"
 mkdir -p "$STATE_DIR"
+
+# Miner command. Resolves to the repo's docker wrapper next to hooks/;
+# MEMPAL_MINE_CMD overrides it (used by tests to stub the docker layer).
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MINE_CMD="${MEMPAL_MINE_CMD:-$HOOK_DIR/../mine-wrapper.sh}"
 
 # Optional: project directory (code / notes / docs) to also mine before
 # compaction. Mined with `--mode projects`. The conversation transcript
@@ -86,14 +92,14 @@ echo "[$(date '+%H:%M:%S')] PRE-COMPACT triggered for session $SESSION_ID" >> "$
 #   2. MEMPAL_DIR → --mode projects
 # Adapted from upstream MemPalace eb4de04 (PR #1231 by @igorls).
 if is_valid_transcript_path "$TRANSCRIPT_PATH" && [ -f "$TRANSCRIPT_PATH" ]; then
-    python3 -m mempalace mine "$(dirname "$TRANSCRIPT_PATH")" --mode convos \
+    "$MINE_CMD" "$(dirname "$TRANSCRIPT_PATH")" --mode convos \
         >> "$STATE_DIR/hook.log" 2>&1
 elif [ -n "$TRANSCRIPT_PATH" ]; then
     echo "[$(date '+%H:%M:%S')] Skipping invalid transcript path: $TRANSCRIPT_PATH" \
         >> "$STATE_DIR/hook.log"
 fi
 if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
-    python3 -m mempalace mine "$MEMPAL_DIR" --mode projects \
+    "$MINE_CMD" "$MEMPAL_DIR" --mode projects \
         >> "$STATE_DIR/hook.log" 2>&1
 fi
 

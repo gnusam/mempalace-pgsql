@@ -45,16 +45,22 @@
 # stop_hook_active=true so we let it through. No infinite loop.
 #
 # === MEMPALACE CLI ===
-# The hook ALWAYS mines the active conversation transcript automatically
-# (via `python3 -m mempalace mine <transcript-dir> --mode convos`).
-# MEMPAL_DIR is an *additional*, optional target for project files —
-# it does not replace the conversation mine.
+# The hook ALWAYS mines the active conversation transcript automatically,
+# routed through Docker via mine-wrapper.sh (the host python has none of
+# the PG-era dependencies — see the wrapper header). MEMPAL_DIR is an
+# *additional*, optional target for project files — it does not replace
+# the conversation mine.
 #
 # === CONFIGURATION ===
 
 SAVE_INTERVAL=15  # Save every N human messages (adjust to taste)
 STATE_DIR="$HOME/.mempalace/hook_state"
 mkdir -p "$STATE_DIR"
+
+# Miner command. Resolves to the repo's docker wrapper next to hooks/;
+# MEMPAL_MINE_CMD overrides it (used by tests to stub the docker layer).
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MINE_CMD="${MEMPAL_MINE_CMD:-$HOOK_DIR/../mine-wrapper.sh}"
 
 # Optional: project directory (code / notes / docs) to also mine on each
 # save trigger. Mined with `--mode projects`. The conversation transcript
@@ -184,14 +190,14 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
     # MEMPAL_DIR was set, which was the most common configuration in the
     # wild.
     if is_valid_transcript_path "$TRANSCRIPT_PATH" && [ -f "$TRANSCRIPT_PATH" ]; then
-        python3 -m mempalace mine "$(dirname "$TRANSCRIPT_PATH")" --mode convos \
+        "$MINE_CMD" "$(dirname "$TRANSCRIPT_PATH")" --mode convos \
             >> "$STATE_DIR/hook.log" 2>&1 &
     elif [ -n "$TRANSCRIPT_PATH" ]; then
         echo "[$(date '+%H:%M:%S')] Skipping invalid transcript path: $TRANSCRIPT_PATH" \
             >> "$STATE_DIR/hook.log"
     fi
     if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
-        python3 -m mempalace mine "$MEMPAL_DIR" --mode projects \
+        "$MINE_CMD" "$MEMPAL_DIR" --mode projects \
             >> "$STATE_DIR/hook.log" 2>&1 &
     fi
 
