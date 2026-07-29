@@ -350,3 +350,59 @@ class TestCountAndDelete:
         assert db.drawer_exists(did)
         db.delete_drawer(did)
         assert not db.drawer_exists(did)
+
+
+# ── PostgreSQL-unstorable bytes (port of upstream #1829 / #1833) ─────────
+
+
+class TestPgSanitization:
+    """A NUL or lone surrogate in transcript content must never abort a mine.
+
+    Postgres rejects NUL (0x00) in text/jsonb and psycopg raises
+    UnicodeEncodeError on lone UTF-16 surrogates — either aborts the whole
+    mine run at the first polluted transcript. Port of upstream abaf09b
+    (#1829) + a27129a (#1833), adapted to PalaceDB's single write path.
+    """
+
+    def test_nul_in_content_ingests(self, db):
+        did = db.add_drawer("test_nul", "tools", "before\x00after", source_file="/nul/a.log")
+        got = db.get_drawers(where={"wing": "test_nul"})
+        assert did in got["ids"]
+        idx = got["ids"].index(did)
+        assert got["documents"][idx] == "beforeafter"
+
+    def test_nul_in_metadata_ingests(self, db):
+        did = db.add_drawer(
+            "test_nul",
+            "tools",
+            "clean content",
+            source_file="/nul/b.log",
+            metadata={"tool_output": "x\x00y"},
+        )
+        got = db.get_drawers(where={"wing": "test_nul"})
+        idx = got["ids"].index(did)
+        assert got["metadatas"][idx]["tool_output"] == "xy"
+
+    def test_lone_surrogate_in_content_ingests(self, db):
+        did = db.add_drawer("test_nul", "tools", "bad \ud800 byte", source_file="/nul/c.log")
+        got = db.get_drawers(where={"wing": "test_nul"})
+        idx = got["ids"].index(did)
+        assert got["documents"][idx] == "bad � byte"
+
+    def test_lone_surrogate_in_metadata_ingests(self, db):
+        did = db.add_drawer(
+            "test_nul",
+            "tools",
+            "clean again",
+            source_file="/nul/d.log",
+            metadata={"snippet": "x\udfffy"},
+        )
+        got = db.get_drawers(where={"wing": "test_nul"})
+        idx = got["ids"].index(did)
+        assert got["metadatas"][idx]["snippet"] == "x�y"
+
+    def test_clean_content_unchanged(self, db):
+        did = db.add_drawer("test_nul", "tools", "café ✓ ok", source_file="/nul/e.log")
+        got = db.get_drawers(where={"wing": "test_nul"})
+        idx = got["ids"].index(did)
+        assert got["documents"][idx] == "café ✓ ok"

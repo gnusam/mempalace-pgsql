@@ -10,6 +10,7 @@ import os
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime, date
 from pathlib import Path
 
@@ -38,6 +39,54 @@ def _get_model():
         _model = SentenceTransformer(EMBEDDING_MODEL, device=device)
         logger.info(f"Loaded {EMBEDDING_MODEL} on {device}")
     return _model
+
+
+_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def _sanitize_pg_str(s):
+    """Make a string storable by PostgreSQL: drop NUL, replace lone surrogates.
+
+    PostgreSQL cannot store NUL (0x00) in ``text`` or ``jsonb`` — psycopg
+    rejects it outright ("PostgreSQL text fields cannot contain NUL (0x00)
+    bytes"), and inside metadata it JSON-escapes to ``\\u0000``, which the
+    jsonb cast rejects ("unsupported Unicode escape sequence"). A lone UTF-16
+    surrogate (U+D800–U+DFFF) has no UTF-8 encoding, so psycopg raises
+    UnicodeEncodeError before the query even reaches the server. Either way a
+    single polluted transcript aborts the whole mine run and leaves every
+    file after it unmined.
+
+    Strip NUL, replace surrogates with U+FFFD (mirroring upstream's ChromaDB
+    document handling): rejecting would re-abort the mine, dropping the
+    drawer would lose recall. The encode probe keeps the common clean-string
+    path allocation-free.
+    """
+    if "\x00" in s:
+        s = s.replace("\x00", "")
+    try:
+        s.encode("utf-8")
+    except UnicodeEncodeError:
+        s = _LONE_SURROGATE_RE.sub("�", s)
+    return s
+
+
+def _sanitize_pg(value):
+    """Recursively apply _sanitize_pg_str to strings in dicts/lists/tuples.
+
+    Metadata is sanitized *before* json.dumps: with the default
+    ``ensure_ascii=True`` both NUL and lone surrogates serialize to ``\\uXXXX``
+    escapes that the server-side jsonb cast rejects, so cleaning the
+    serialized string would be too late. Non-string scalars pass through.
+    """
+    if isinstance(value, str):
+        return _sanitize_pg_str(value)
+    if isinstance(value, dict):
+        return {_sanitize_pg(k): _sanitize_pg(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_pg(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_pg(v) for v in value)
+    return value
 
 
 def embed(texts):
@@ -109,6 +158,10 @@ class PalaceDB:
         # every call and let the same content pile up as duplicates; it is
         # also the fix for upstream findings #6 (TOCTOU) and #13 (non-
         # deterministic IDs).
+        # Sanitize before hashing so the drawer ID stays consistent with the
+        # stored (cleaned) content across re-mines of the same file.
+        content = _sanitize_pg_str(content)
+        source_file = _sanitize_pg_str(source_file) if source_file else source_file
         if source_file:
             hash_input = source_file + str(chunk_index)
         else:
@@ -124,7 +177,7 @@ class PalaceDB:
                 meta_dict["source_mtime"] = os.path.getmtime(source_file)
             except OSError:
                 pass
-        meta = json.dumps(meta_dict)
+        meta = json.dumps(_sanitize_pg(meta_dict))
         cur = self.conn().cursor()
         try:
             # Upsert so that re-mining a modified file actually updates the
@@ -401,8 +454,9 @@ class PalaceDB:
     # ── Compressed (AAAK) ────────────────────────────────────────────────
 
     def upsert_compressed(self, drawer_id, content, metadata=None):
+        content = _sanitize_pg_str(content)
         emb = embed([content])[0]
-        meta = json.dumps(metadata or {})
+        meta = json.dumps(_sanitize_pg(metadata or {}))
         cur = self.conn().cursor()
         cur.execute(
             """INSERT INTO compressed (id, content, embedding, metadata)
