@@ -449,3 +449,48 @@ def test_process_file_accepts_normal_line_lengths():
         assert room == "general"
     finally:
         shutil.rmtree(tmpdir)
+
+
+# --- exclude_patterns: user glob exclusions in mempalace.yaml ---
+
+
+def test_scan_project_respects_exclude_patterns():
+    """exclude_patterns from mempalace.yaml prune files by relative path or
+    basename, and prune whole directories (deferred candidate from the
+    2026-07-29 upstream audit)."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        root = Path(tmpdir).resolve()
+        (root / "keep.py").write_text("print('keep')\n")
+        (root / "schema.lock.md").write_text("lockfile-ish\n")
+        gen = root / "docs" / "generated"
+        gen.mkdir(parents=True)
+        (gen / "api.md").write_text("generated docs\n")
+        (root / "docs" / "manual.md").write_text("handwritten docs\n")
+
+        names = {
+            p.relative_to(root).as_posix()
+            for p in scan_project(str(root), exclude_patterns=["docs/generated/*", "*.lock.md"])
+        }
+        assert "keep.py" in names
+        assert "docs/manual.md" in names
+        assert "schema.lock.md" not in names
+        assert not any(n.startswith("docs/generated/") for n in names)
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_scan_project_exclude_pattern_prunes_directory_by_name():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        root = Path(tmpdir).resolve()
+        fixtures = root / "fixtures"
+        fixtures.mkdir()
+        (fixtures / "huge.json").write_text('{"a": 1}\n')
+        (root / "main.py").write_text("print('hi')\n")
+
+        names = {p.name for p in scan_project(str(root), exclude_patterns=["fixtures"])}
+        assert "main.py" in names
+        assert "huge.json" not in names
+    finally:
+        shutil.rmtree(tmpdir)

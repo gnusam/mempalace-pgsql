@@ -525,10 +525,29 @@ def process_file(
 # =============================================================================
 
 
+def _matches_exclude_pattern(path: Path, project_path: Path, patterns: list) -> bool:
+    """True if the path matches any user exclude pattern.
+
+    Patterns are fnmatch globs from mempalace.yaml's ``exclude_patterns``
+    (deferred candidate from the 2026-07-29 upstream audit), matched
+    against BOTH the project-relative POSIX path and the basename, so
+    ``docs/generated/*``, ``*.lock`` and ``fixtures`` all behave the way
+    people expect from .gitignore-style tooling.
+    """
+    if not patterns:
+        return False
+    try:
+        rel = path.relative_to(project_path).as_posix()
+    except ValueError:
+        rel = path.name
+    return any(fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(path.name, pat) for pat in patterns)
+
+
 def scan_project(
     project_dir: str,
     respect_gitignore: bool = True,
     include_ignored: list = None,
+    exclude_patterns: list = None,
 ) -> list:
     """Return list of all readable file paths."""
     project_path = Path(project_dir).expanduser().resolve()
@@ -536,6 +555,7 @@ def scan_project(
     active_matchers = []
     matcher_cache = {}
     include_paths = normalize_include_paths(include_ignored)
+    exclude_patterns = exclude_patterns or []
 
     for root, dirs, filenames in os.walk(project_path):
         root_path = Path(root)
@@ -556,6 +576,15 @@ def scan_project(
             if is_force_included(root_path / d, project_path, include_paths)
             or not should_skip_dir(d)
         ]
+        # User exclude_patterns prune directories too (force-include wins,
+        # matching the precedence .gitignore handling uses below).
+        if exclude_patterns:
+            dirs[:] = [
+                d
+                for d in dirs
+                if is_force_included(root_path / d, project_path, include_paths)
+                or not _matches_exclude_pattern(root_path / d, project_path, exclude_patterns)
+            ]
         if respect_gitignore and active_matchers:
             dirs[:] = [
                 d
@@ -570,6 +599,10 @@ def scan_project(
             exact_force_include = is_exact_force_include(filepath, project_path, include_paths)
 
             if not force_include and filename in SKIP_FILENAMES:
+                continue
+            if not force_include and _matches_exclude_pattern(
+                filepath, project_path, exclude_patterns
+            ):
                 continue
             # Skip minified bundles by filename pattern (e.g. foo.min.js,
             # swagger-ui-bundle.js). These are noise for semantic search
@@ -621,11 +654,18 @@ def mine(
 
     wing = wing_override or config["wing"]
     rooms = config.get("rooms", [{"name": "general", "description": "All project files"}])
+    exclude_patterns = config.get("exclude_patterns") or []
+    if not isinstance(exclude_patterns, list) or not all(
+        isinstance(p, str) for p in exclude_patterns
+    ):
+        print("ERROR: exclude_patterns in mempalace.yaml must be a list of glob strings")
+        sys.exit(1)
 
     files = scan_project(
         project_dir,
         respect_gitignore=respect_gitignore,
         include_ignored=include_ignored,
+        exclude_patterns=exclude_patterns,
     )
     if limit > 0:
         files = files[:limit]
@@ -643,6 +683,8 @@ def mine(
         print("  .gitignore: DISABLED")
     if include_ignored:
         print(f"  Include: {', '.join(sorted(normalize_include_paths(include_ignored)))}")
+    if exclude_patterns:
+        print(f"  Exclude: {', '.join(exclude_patterns)}")
     print(f"{'─' * 55}\n")
 
     if not dry_run:
