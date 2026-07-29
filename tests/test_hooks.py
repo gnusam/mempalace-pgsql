@@ -64,6 +64,50 @@ def _make_transcript(home, n_user_messages):
     return transcript
 
 
+# ── SessionEnd hook (port of upstream d09392c) ───────────────────────────
+
+
+class TestSessionEndHook:
+    def test_mines_transcript_in_background_and_returns_immediately(self, hook_env):
+        env, home, calls = hook_env
+        transcript = _make_transcript(home, 3)
+        start = time.monotonic()
+        result = _run_hook(
+            HOOKS / "mempal_sessionend_hook.sh",
+            {"session_id": "abc-123", "transcript_path": str(transcript)},
+            env,
+        )
+        elapsed = time.monotonic() - start
+        assert result.returncode == 0
+        assert json.loads(result.stdout.strip()) == {}
+        assert elapsed < 5, "SessionEnd must return well within its budget"
+        assert _wait_for(calls), "detached mine never ran"
+        assert calls.read_text().strip() == f"{transcript.parent} --mode convos"
+
+    def test_rejects_traversal_path(self, hook_env):
+        env, home, calls = hook_env
+        result = _run_hook(
+            HOOKS / "mempal_sessionend_hook.sh",
+            {"session_id": "abc-123", "transcript_path": "/tmp/../etc/x.jsonl"},
+            env,
+        )
+        assert result.returncode == 0
+        assert json.loads(result.stdout.strip()) == {}
+        time.sleep(0.3)
+        assert not calls.exists(), "mine must not run on an invalid path"
+
+    def test_rejects_non_jsonl_path(self, hook_env):
+        env, home, calls = hook_env
+        result = _run_hook(
+            HOOKS / "mempal_sessionend_hook.sh",
+            {"session_id": "abc-123", "transcript_path": "/etc/passwd"},
+            env,
+        )
+        assert result.returncode == 0
+        time.sleep(0.3)
+        assert not calls.exists()
+
+
 # ── Stop hook routes its mine through the wrapper ────────────────────────
 
 

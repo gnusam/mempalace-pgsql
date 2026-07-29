@@ -8,12 +8,15 @@ These hook scripts make MemPalace save automatically. No manual "save" commands 
 |------|--------------|-------------|
 | **Save Hook** | Every 15 human messages | Blocks the AI, tells it to save key topics/decisions/quotes to the palace |
 | **PreCompact Hook** | Right before context compaction | Emergency save — forces the AI to save EVERYTHING before losing context |
+| **SessionEnd Hook** | On clean session exit | Final background mine of the transcript, so short sessions under the Stop interval are still captured |
 
 The AI does the actual filing — it knows the conversation context, so it classifies memories into the right wings/halls/closets. The hooks just tell it WHEN to save.
 
+All three hooks mine through Docker via `mine-wrapper.sh` at the repo root: the host python does not need any of the mining dependencies (psycopg2, sentence-transformers) — the wrapper reuses the same image as the MCP server, translates host paths to container mounts, and serializes concurrent mines with a non-blocking flock. SessionEnd cannot block or message the AI (and Claude Code budgets it at ~1.5s), so it only detaches the CLI mine and returns immediately (adapted from upstream `d09392c`, #1341).
+
 ## Install — Claude Code
 
-Add to `.claude/settings.local.json`:
+Add to `~/.claude/settings.json` to cover **every** project (recommended — the palace is global, so project-scoped hooks silently skip all your other work), or to a project's `.claude/settings.local.json` to scope it down:
 
 ```json
 {
@@ -32,14 +35,23 @@ Add to `.claude/settings.local.json`:
         "command": "/absolute/path/to/hooks/mempal_precompact_hook.sh",
         "timeout": 30
       }]
+    }],
+    "SessionEnd": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/absolute/path/to/hooks/mempal_sessionend_hook.sh",
+        "timeout": 10
+      }]
     }]
   }
 }
 ```
 
+Do not register the same hooks in both the global and a project settings file — Claude Code merges hook sources, so they would fire twice.
+
 Make them executable:
 ```bash
-chmod +x hooks/mempal_save_hook.sh hooks/mempal_precompact_hook.sh
+chmod +x hooks/*.sh mine-wrapper.sh
 ```
 
 ## Install — Codex CLI (OpenAI)
@@ -78,7 +90,7 @@ mempalace mine <dir>               # Mine all files in a directory
 mempalace mine <dir> --mode convos # Mine conversation transcripts only
 ```
 
-The hooks resolve the repo root automatically from their own path, so they work regardless of where you install the repo.
+The hooks resolve the repo root (and thus `mine-wrapper.sh`) automatically from their own path, so they work regardless of where you install the repo. Set `MEMPAL_MINE_CMD` to substitute another miner command (the test suite uses this to stub the Docker layer).
 
 ## How It Works (Technical)
 
@@ -117,6 +129,22 @@ Context window getting full → Claude Code fires PreCompact
 ```
 
 No counting needed — compaction always warrants a save.
+
+### SessionEnd Hook
+
+```
+Session exits cleanly → Claude Code fires SessionEnd (~1.5s budget)
+                                ↓
+                        Hook validates transcript path
+                                ↓
+                        nohup mine-wrapper.sh … & disown  (detached)
+                                ↓
+                        echo "{}" — returns immediately
+                                ↓
+                        Child finishes the mine after the session is gone
+```
+
+The mine is idempotent (mtime-aware `file_already_mined`) and the wrapper's flock skips a run if a Stop-hook mine is still in flight, so racing triggers are harmless.
 
 ## Debugging
 

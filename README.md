@@ -635,17 +635,22 @@ The AI learns AAAK and the memory protocol automatically from the `mempalace_sta
 
 ## Auto-Save Hooks
 
-Two hooks for Claude Code that automatically save memories during work:
+Three hooks for Claude Code that automatically save memories during work:
 
 **Save Hook** — every 15 messages, triggers a structured save. Topics, decisions, quotes, code changes. Also regenerates the critical facts layer.
 
 **PreCompact Hook** — fires before context compression. Emergency save before the window shrinks.
 
+**SessionEnd Hook** — one final background mine on clean exit, so short sessions under the Stop interval are still captured (adapted from upstream [`d09392c`](https://github.com/MemPalace/mempalace/commit/d09392c), #1341).
+
+All three mine through Docker via `mine-wrapper.sh` — the host python needs none of the mining dependencies; the wrapper reuses the MCP server image, translates host paths to container mounts, and serializes concurrent mines with a flock. Register the hooks in `~/.claude/settings.json` (global) so every project feeds the palace, not just this repo — see `hooks/README.md`.
+
 ```json
 {
   "hooks": {
     "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "/path/to/mempalace/hooks/mempal_save_hook.sh"}]}],
-    "PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "/path/to/mempalace/hooks/mempal_precompact_hook.sh"}]}]
+    "PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "/path/to/mempalace/hooks/mempal_precompact_hook.sh"}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "/path/to/mempalace/hooks/mempal_sessionend_hook.sh", "timeout": 10}]}]
   }
 }
 ```
@@ -768,6 +773,8 @@ Plain text. Becomes Layer 0 — loaded every session.
 | `split_mega_files.py` | Split concatenated transcripts into per-session files |
 | `hooks/mempal_save_hook.sh` | Auto-save every N messages |
 | `hooks/mempal_precompact_hook.sh` | Emergency save before compaction |
+| `hooks/mempal_sessionend_hook.sh` | Final background mine on clean session exit |
+| `mine-wrapper.sh` | Docker-routed miner used by all hooks |
 
 ---
 
