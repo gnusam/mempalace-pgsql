@@ -1,6 +1,7 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    mem_limit: 6g
     # Docker's default /dev/shm (64MB) is too small for pgvector HNSW
     # parallel index builds — REINDEX with max_parallel_maintenance_workers>0
     # fails with "could not resize shared memory segment: No space left on
@@ -34,6 +35,7 @@ services:
 
   mempalace:
     build: .
+    mem_limit: 4g
     environment:
       DATABASE_URL: postgresql://mempalace:mempalace@postgres:5432/mempalace
       PYTHONPATH: /app

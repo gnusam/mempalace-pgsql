@@ -75,6 +75,7 @@ fi
 args=(
     docker run --rm -i
     --name "mempalace-mcp-$PPID"
+    --memory 4g
     --network "$NETWORK"
     -e "DATABASE_URL=$DB_URL"
     -e "PYTHONPATH=/app"
