@@ -71,6 +71,35 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     docker compose -f "$COMPOSE_FILE" build mempalace >/dev/null 2>&1
 fi
 
+# ── Persistent worker: no veth per mine ─────────────────────────────
+# A `docker run` per mine creates a veth on every Stop hook, and each new
+# veth makes NetworkManager drop Chrome's connections (ERR_NETWORK_CHANGED,
+# Drive downloads failing with "Check internet connection"). The common
+# prefixes go through one long-lived container (`docker exec`); it is only
+# (re)created when missing or when the image was rebuilt.
+WORKER="${PROJECT}-miner"
+if [ ${#extra_mounts[@]} -gt 0 ] && [ "$CONTAINER_PATH" != "/mine-target" ]; then
+    want_image=$(docker image inspect -f '{{.Id}}' "$IMAGE")
+    have_image=$(docker inspect -f '{{.Image}}' "$WORKER" 2>/dev/null || true)
+    running=$(docker inspect -f '{{.State.Running}}' "$WORKER" 2>/dev/null || true)
+    if [ "$have_image" != "$want_image" ] || [ "$running" != "true" ]; then
+        docker rm -f "$WORKER" >/dev/null 2>&1 || true
+        docker run -d --name "$WORKER" \
+            --restart unless-stopped \
+            --network "$NETWORK" \
+            -e "DATABASE_URL=$DB_URL" \
+            -e "PYTHONPATH=/app" \
+            -e "MEMPALACE_DEVICE=cpu" \
+            -v "${PROJECT}_model-cache:/root/.cache" \
+            -v "$COMPOSE_DIR/mempalace:/app/mempalace:ro" \
+            -v "$HOME/.claude/projects:/transcripts:ro" \
+            -v "$HOME/dev:/projects:ro" \
+            --entrypoint sleep \
+            "$IMAGE" infinity >/dev/null
+    fi
+    exec docker exec -i "$WORKER" python -m mempalace mine "$CONTAINER_PATH" "$@"
+fi
+
 exec docker run --rm -i \
     --name "mempalace-mine-$$" \
     --network "$NETWORK" \
