@@ -82,6 +82,7 @@ def cmd_mine(args):
             limit=args.limit,
             dry_run=args.dry_run,
             extract_mode=args.extract,
+            include_subagents=getattr(args, "include_subagents", False),
         )
     else:
         from .miner import mine
@@ -331,6 +332,14 @@ def main():
         choices=["exchange", "general"],
         default="exchange",
         help="Extraction strategy for convos mode: 'exchange' (default) or 'general' (5 memory types)",
+    )
+    p_mine.add_argument(
+        "--include-subagents",
+        action="store_true",
+        help=(
+            "Convos mode: also mine subagent transcripts (subagents/ dirs). Excluded by "
+            "default: short ephemeral exchanges already summarized in the parent session"
+        ),
     )
 
     # search

@@ -49,3 +49,48 @@ def test_cmd_mcp_quotes_palace_path_with_spaces(capsys):
     out = capsys.readouterr().out
     # shlex.quote wraps strings containing spaces in single quotes
     assert "'/tmp/palace with spaces'" in out
+
+
+# --- Upstream 5f425ba4 (PR #1217): --include-subagents ---
+
+
+def _parse_mine(monkeypatch, *argv):
+    """Run main() with a recording cmd_mine and return the parsed Namespace."""
+    from mempalace import cli
+
+    seen = []
+    monkeypatch.setattr(cli, "cmd_mine", seen.append)
+    monkeypatch.setattr("sys.argv", ["mempalace", "mine", "/some/dir", *argv])
+    cli.main()
+    return seen[0]
+
+
+def test_mine_include_subagents_flag_defaults_off(monkeypatch):
+    assert _parse_mine(monkeypatch, "--mode", "convos").include_subagents is False
+
+
+def test_mine_include_subagents_flag_parses(monkeypatch):
+    args = _parse_mine(monkeypatch, "--mode", "convos", "--include-subagents")
+    assert args.include_subagents is True
+
+
+def test_cmd_mine_passes_include_subagents_to_convo_miner(monkeypatch):
+    from mempalace import cli, convo_miner
+
+    calls = []
+    monkeypatch.setattr(convo_miner, "mine_convos", lambda **kw: calls.append(kw))
+    for flag in (False, True):
+        args = argparse.Namespace(
+            palace="/tmp/p",
+            include_ignored=[],
+            mode="convos",
+            dir="/some/dir",
+            wing=None,
+            agent="mempalace",
+            limit=0,
+            dry_run=True,
+            extract="exchange",
+            include_subagents=flag,
+        )
+        cli.cmd_mine(args)
+    assert [c["include_subagents"] for c in calls] == [False, True]

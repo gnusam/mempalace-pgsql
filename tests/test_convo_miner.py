@@ -104,6 +104,55 @@ def test_chunk_by_exchange_splits_oversize_exchange_across_drawers():
     assert total_len >= len(ai_response)
 
 
+# --- Upstream 5f425ba4 / a3350ec5 (PR #1217): subagent transcripts are opt-in ---
+
+
+def _subagent_tree(root):
+    session = root / "proj" / "session-uuid"
+    (session / "subagents").mkdir(parents=True)
+    (session / "Subagents").mkdir()
+    (root / "proj" / "mysubagents").mkdir()
+    (root / "proj" / "main.jsonl").write_text("{}\n", encoding="utf-8")
+    (session / "subagents" / "agent-1.jsonl").write_text("{}\n", encoding="utf-8")
+    (session / "Subagents" / "agent-2.jsonl").write_text("{}\n", encoding="utf-8")
+    (root / "proj" / "mysubagents" / "keep.jsonl").write_text("{}\n", encoding="utf-8")
+
+
+def test_scan_convos_skips_subagents_by_default():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        root = Path(tmpdir)
+        _subagent_tree(root)
+        files = sorted(p.name for p in scan_convos(str(root)))
+        # Only the exact directory name (any case) is pruned, not look-alikes.
+        assert files == ["keep.jsonl", "main.jsonl"]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_scan_convos_include_subagents_opt_in():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        root = Path(tmpdir)
+        _subagent_tree(root)
+        files = sorted(p.name for p in scan_convos(str(root), include_subagents=True))
+        assert files == ["agent-1.jsonl", "agent-2.jsonl", "keep.jsonl", "main.jsonl"]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_mine_convos_forwards_include_subagents_to_scan(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        convo_miner,
+        "scan_convos",
+        lambda d, include_subagents=False: seen.append(include_subagents) or [],
+    )
+    for flag in (False, True):
+        mine_convos("/nonexistent", palace_path=None, dry_run=True, include_subagents=flag)
+    assert seen == [False, True]
+
+
 # --- Upstream 66a354bf (PR #2591): the exchange chunker never discards text ---
 
 

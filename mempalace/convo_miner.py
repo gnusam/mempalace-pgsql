@@ -305,12 +305,28 @@ def file_already_mined(db, source_file: str, extract_mode: str = "exchange") -> 
 # =============================================================================
 
 
-def scan_convos(convo_dir: str) -> list:
-    """Find all potential conversation files."""
+def scan_convos(convo_dir: str, include_subagents: bool = False) -> list:
+    """Find all potential conversation files.
+
+    Directories named ``subagents`` are pruned by default (adapted from
+    upstream 5f425ba4 / a3350ec5, PR #1217): Claude Code records its
+    Explore/Plan/Grep subagent transcripts in
+    ``<session-uuid>/subagents/agent-*.jsonl``, which outweigh the main
+    session files by one to two orders of magnitude while the parent session
+    already summarizes them. Pass ``include_subagents=True`` to mine them
+    anyway. The match is case-insensitive on the whole directory name, so
+    ``mysubagents`` is untouched. It lives here, not in SKIP_DIRS, because
+    project mining must keep descending into a code project's own
+    ``subagents/`` directories.
+    """
     convo_path = Path(convo_dir).expanduser().resolve()
     files = []
     for root, dirs, filenames in os.walk(convo_path):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        dirs[:] = [
+            d
+            for d in dirs
+            if d not in SKIP_DIRS and (include_subagents or d.lower() != "subagents")
+        ]
         for filename in filenames:
             if filename.endswith(".meta.json"):
                 continue
@@ -342,19 +358,23 @@ def mine_convos(
     limit: int = 0,
     dry_run: bool = False,
     extract_mode: str = "exchange",
+    include_subagents: bool = False,
 ):
     """Mine a directory of conversation files into the palace.
 
     extract_mode:
         "exchange" — default exchange-pair chunking (Q+A = one unit)
         "general"  — general extractor: decisions, preferences, milestones, problems, emotions
+
+    include_subagents: also mine ``subagents/`` transcripts (skipped by default,
+    see scan_convos).
     """
 
     convo_path = Path(convo_dir).expanduser().resolve()
     if not wing:
         wing = convo_path.name.lower().replace(" ", "_").replace("-", "_")
 
-    files = scan_convos(convo_dir)
+    files = scan_convos(convo_dir, include_subagents=include_subagents)
     if limit > 0:
         files = files[:limit]
 
