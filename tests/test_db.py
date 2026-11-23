@@ -996,3 +996,100 @@ class TestDrawerCrudTools:
         assert result["deleted"] == 2
         assert db.drawer_exists(keep) is True
         assert "error" in mcp.tool_delete_by_source("   ")
+
+
+class TestRegistrySentinelsHidden:
+    """0-chunk registry sentinels must stay out of every user-facing read.
+
+    Adapted from upstream a778964f / 93aac28c: the filter keys on
+    metadata.ingest_mode, never on the room name, so a user's own room
+    called "_registry" keeps its drawers. The freshness check and the
+    by-source delete still see the sentinels (they own them).
+    """
+
+    def _seed(self, db, tmp_path, wing):
+        f = tmp_path / f"{wing}.md"
+        f.write_text("empty-ish")
+        src = str(f)
+        sentinel = db.register_empty_file(src, wing)
+        real = db.add_drawer(wing, "notes", "a real drawer about registries " * 3)
+        return src, sentinel, real
+
+    def test_reads_exclude_sentinels(self, db, tmp_path):
+        wing = "test_regsent_reads"
+        src, sentinel, real = self._seed(db, tmp_path, wing)
+        assert db.count(where={"wing": wing}) == 1
+        got = db.get_drawers(where={"wing": wing})
+        assert got["ids"] == [real]
+        assert db.get_drawers(where={"id": sentinel})["ids"] == []
+
+    def test_query_filtered_and_unfiltered_skip_sentinels(self, db, tmp_path):
+        wing = "test_regsent_query"
+        src, sentinel, real = self._seed(db, tmp_path, wing)
+        # Filtered branch: used to raise TypeError on float(None) distance.
+        res = db.query("registries", n_results=10, where={"wing": wing}, auto_detect=False)
+        assert res["ids"][0] == [real]
+        # Unfiltered branch: a small table is seq-scanned, NULL distances last.
+        res = db.query("registries", n_results=500, auto_detect=False)
+        assert sentinel not in res["ids"][0]
+        assert real in res["ids"][0]
+
+    def test_auto_detect_ignores_sentinel_only_wing(self, db, tmp_path):
+        wing = "test_regsent_onlywing"
+        f = tmp_path / "only.md"
+        f.write_text("x")
+        db.register_empty_file(str(f), wing)
+        assert db._auto_detect_filter(wing) is None
+        # "_registry" is the sentinel room name, not a room users can detect.
+        assert db._auto_detect_filter("_registry") is None
+
+    def test_mcp_taxonomy_tools_exclude_sentinels(self, db, tmp_path, monkeypatch):
+        import mempalace.mcp_server as mcp
+
+        monkeypatch.setattr(mcp, "_get_db", lambda: db)
+        wing = "test_regsent_mcp"
+        self._seed(db, tmp_path, wing)
+        assert mcp.tool_list_wings()["wings"][wing] == 1
+        assert mcp.tool_list_rooms(wing)["rooms"] == {"notes": 1}
+        assert "_registry" not in mcp.tool_list_rooms()["rooms"]
+        assert mcp.tool_get_taxonomy()["taxonomy"][wing] == {"notes": 1}
+        status = mcp.tool_status()
+        assert status["wings"][wing] == 1
+        assert "_registry" not in status["rooms"]
+        listed = mcp.tool_list_drawers(wing=wing)
+        assert listed["count"] == 1 and listed["total"] == 1
+
+    def test_graph_has_no_registry_room(self, db, tmp_path, monkeypatch):
+        from mempalace import palace_graph
+
+        monkeypatch.setattr(palace_graph, "get_db", lambda: db)
+        for wing in ("test_regsent_g1", "test_regsent_g2"):
+            self._seed(db, tmp_path, wing)
+        nodes, edges = palace_graph.build_graph()
+        assert "_registry" not in nodes
+        assert not any(e["room"] == "_registry" for e in edges)
+
+    def test_user_room_named_registry_stays_visible(self, db):
+        wing = "test_regsent_userroom"
+        d = db.add_drawer(wing, "_registry", "a user's own drawer in a room named _registry")
+        try:
+            assert db.get_drawers(where={"wing": wing})["ids"] == [d]
+            assert db.count(where={"wing": wing}) == 1
+        finally:
+            # Other tests assert no "_registry" room shows up in listings.
+            db.delete_drawer(d)
+
+    def test_owners_of_sentinels_still_see_them(self, db, tmp_path):
+        wing = "test_regsent_owner"
+        src, sentinel, real = self._seed(db, tmp_path, wing)
+        # Freshness check counts the sentinel: a sentinel-only file is "mined".
+        only = tmp_path / "onlysentinel.md"
+        only.write_text("y")
+        db.register_empty_file(str(only), wing)
+        assert db.file_already_mined(str(only), ingest_mode="convos") is True
+        assert str(only) in db.files_already_mined(
+            [(str(only), os.path.getmtime(str(only)))], ingest_mode="convos"
+        )
+        # By-source delete reports and removes the sentinel.
+        assert db.delete_by_source(src, dry_run=True)["matched"] == 1
+        assert db.delete_by_source(src, dry_run=False)["deleted"] == 1

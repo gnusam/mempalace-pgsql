@@ -35,7 +35,7 @@ from .config import MempalaceConfig, sanitize_iso_date
 from .version import __version__
 from .searcher import search_memories
 from .palace_graph import traverse, find_tunnels, graph_stats
-from .db import get_db
+from .db import NOT_REGISTRY_SQL, get_db
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -95,9 +95,15 @@ def tool_status():
     db = _get_db()
     count = db.count()
     cur = db.conn().cursor()
-    cur.execute("SELECT wing, count(*) FROM drawers GROUP BY wing ORDER BY count DESC")
+    cur.execute(
+        f"SELECT wing, count(*) FROM drawers WHERE {NOT_REGISTRY_SQL} "
+        "GROUP BY wing ORDER BY count DESC"
+    )
     wings = {r[0]: r[1] for r in cur.fetchall()}
-    cur.execute("SELECT room, count(*) FROM drawers GROUP BY room ORDER BY count DESC LIMIT 50")
+    cur.execute(
+        f"SELECT room, count(*) FROM drawers WHERE {NOT_REGISTRY_SQL} "
+        "GROUP BY room ORDER BY count DESC LIMIT 50"
+    )
     rooms = {r[0]: r[1] for r in cur.fetchall()}
     return {
         "total_drawers": count,
@@ -144,7 +150,10 @@ When WRITING AAAK: use entity codes, mark emotions, keep structure tight."""
 def tool_list_wings():
     db = _get_db()
     cur = db.conn().cursor()
-    cur.execute("SELECT wing, count(*) FROM drawers GROUP BY wing ORDER BY count DESC")
+    cur.execute(
+        f"SELECT wing, count(*) FROM drawers WHERE {NOT_REGISTRY_SQL} "
+        "GROUP BY wing ORDER BY count DESC"
+    )
     wings = {r[0]: r[1] for r in cur.fetchall()}
     return {"wings": wings}
 
@@ -155,11 +164,15 @@ def tool_list_rooms(wing: str = None):
     cur = db.conn().cursor()
     if wing:
         cur.execute(
-            "SELECT room, count(*) FROM drawers WHERE wing = %s GROUP BY room ORDER BY count DESC",
+            f"SELECT room, count(*) FROM drawers WHERE wing = %s AND {NOT_REGISTRY_SQL} "
+            "GROUP BY room ORDER BY count DESC",
             (wing,),
         )
     else:
-        cur.execute("SELECT room, count(*) FROM drawers GROUP BY room ORDER BY count DESC")
+        cur.execute(
+            f"SELECT room, count(*) FROM drawers WHERE {NOT_REGISTRY_SQL} "
+            "GROUP BY room ORDER BY count DESC"
+        )
     rooms = {r[0]: r[1] for r in cur.fetchall()}
     return {"wing": wing or "all", "rooms": rooms}
 
@@ -168,7 +181,8 @@ def tool_get_taxonomy():
     db = _get_db()
     cur = db.conn().cursor()
     cur.execute(
-        "SELECT wing, room, count(*) FROM drawers GROUP BY wing, room ORDER BY wing, count DESC"
+        f"SELECT wing, room, count(*) FROM drawers WHERE {NOT_REGISTRY_SQL} "
+        "GROUP BY wing, room ORDER BY wing, count DESC"
     )
     taxonomy = {}
     for w, r, c in cur.fetchall():

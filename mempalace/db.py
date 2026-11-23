@@ -25,6 +25,22 @@ DEFAULT_DSN = "postgresql://mempalace:mempalace@localhost:5432/mempalace"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
 
+# Predicate shared by every user-facing read: registry sentinels (0-chunk
+# bookkeeping rows written by register_empty_file) are keyed on
+# metadata.ingest_mode, never on the room name, so a user's own room called
+# "_registry" stays visible. Adapted from upstream a778964f / 93aac28c
+# (bookkeeping rows named by ingest_mode). The freshness check, the by-source
+# delete and replace_file_drawers deliberately do NOT use it: they own the
+# sentinels. IS DISTINCT FROM keeps rows without an ingest_mode key (project
+# mining) visible, where a plain <> would drop their NULL.
+NOT_REGISTRY_SQL = "((metadata->>'ingest_mode') IS DISTINCT FROM 'registry')"
+
+
+def with_visible(clauses):
+    """AND the not-a-sentinel predicate onto a WHERE fragment (may be empty)."""
+    return f"{clauses} AND {NOT_REGISTRY_SQL}" if clauses else NOT_REGISTRY_SQL
+
+
 # Lazy-loaded model
 _model = None
 
@@ -653,8 +669,7 @@ class PalaceDB:
         clauses, params = self._build_where(where)
         clauses, params = self._date_window_clauses(clauses, params, since, before)
         sql = "SELECT id, wing, room, content, source_file, chunk_index, added_by, filed_at, metadata FROM drawers"
-        if clauses:
-            sql += f" WHERE {clauses}"
+        sql += f" WHERE {with_visible(clauses)}"
         sql += " ORDER BY filed_at DESC"
         if limit:
             sql += f" LIMIT {int(limit)}"
@@ -715,6 +730,7 @@ class PalaceDB:
 
         conn = self.conn()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        visible = with_visible(clauses)
 
         if clauses:
             # HNSW doesn't support pre-filtering. Wrap in a transaction
@@ -734,7 +750,7 @@ class PalaceDB:
                 sql = f"""SELECT id, wing, room, content, source_file, chunk_index,
                                  added_by, filed_at, metadata,
                                  embedding <=> %s AS distance
-                          FROM drawers WHERE {clauses}
+                          FROM drawers WHERE {visible}
                           ORDER BY distance LIMIT {int(n_results)}"""
                 cur.execute(sql, [emb] + params)
                 rows = cur.fetchall()
@@ -762,7 +778,7 @@ class PalaceDB:
                 sql = f"""SELECT id, wing, room, content, source_file, chunk_index,
                                 added_by, filed_at, metadata,
                                 embedding <=> %s AS distance
-                         FROM drawers
+                         FROM drawers WHERE {visible}
                          ORDER BY distance LIMIT {int(n_results)}"""
                 cur.execute(sql, [emb])
                 rows = cur.fetchall()
@@ -866,9 +882,7 @@ class PalaceDB:
     def count(self, where=None, since=None, before=None):
         clauses, params = self._build_where(where)
         clauses, params = self._date_window_clauses(clauses, params, since, before)
-        sql = "SELECT COUNT(*) FROM drawers"
-        if clauses:
-            sql += f" WHERE {clauses}"
+        sql = f"SELECT COUNT(*) FROM drawers WHERE {with_visible(clauses)}"
         cur = self.conn().cursor()
         cur.execute(sql, params)
         return cur.fetchone()[0]
@@ -1162,7 +1176,10 @@ class PalaceDB:
         cur = self.conn().cursor()
 
         # Check exact wing match
-        cur.execute("SELECT DISTINCT wing FROM drawers WHERE wing IS NOT NULL AND wing <> ''")
+        cur.execute(
+            "SELECT DISTINCT wing FROM drawers "
+            f"WHERE wing IS NOT NULL AND wing <> '' AND {NOT_REGISTRY_SQL}"
+        )
         wings = [r[0] for r in cur.fetchall()]
         for w in wings:
             w_lower = w.lower()
@@ -1173,7 +1190,10 @@ class PalaceDB:
                 return {"wing": w}
 
         # Check exact room match
-        cur.execute("SELECT DISTINCT room FROM drawers WHERE room IS NOT NULL AND room <> ''")
+        cur.execute(
+            "SELECT DISTINCT room FROM drawers "
+            f"WHERE room IS NOT NULL AND room <> '' AND {NOT_REGISTRY_SQL}"
+        )
         rooms = [r[0] for r in cur.fetchall()]
         for r in rooms:
             if r.lower() == normalized:
