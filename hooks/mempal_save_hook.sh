@@ -109,21 +109,50 @@ if [ "$STOP_HOOK_ACTIVE" = "True" ] || [ "$STOP_HOOK_ACTIVE" = "true" ]; then
     exit 0
 fi
 
-# Count human messages in the JSONL transcript
+# Count human messages in the JSONL transcript (real prompts only: no tool_result,
+# notifications, command output or hook feedback, which inflated the count)
 if [ -f "$TRANSCRIPT_PATH" ]; then
     EXCHANGE_COUNT=$(python3 - "$TRANSCRIPT_PATH" <<'PYEOF'
 import json, sys
+
+# Debuts de texte qui ne sont pas des prompts humains : notifications de
+# taches de fond, sorties et noms de commandes locales, rappels systeme,
+# retour de ce hook, reprise de session compactee.
+SKIP_PREFIXES = (
+    '<task-notification>', '<local-command-stdout>', '<local-command-stderr>',
+    '<command-name>', '<command-message>', '<system-reminder>',
+    'Stop hook feedback', 'This session is being continued',
+)
+
+def is_human_prompt(entry):
+    # type 'user' seulement : les entrees 'api-request-blob' redoublent les prompts
+    if entry.get('type') != 'user' or entry.get('isMeta'):
+        return False
+    msg = entry.get('message', {})
+    if not isinstance(msg, dict) or msg.get('role') != 'user':
+        return False
+    content = msg.get('content', '')
+    if isinstance(content, list):
+        # tool_result = retour d'outil, pas un prompt ; sinon le premier bloc texte decide
+        if any(isinstance(b, dict) and b.get('type') == 'tool_result' for b in content):
+            return False
+        texts = [b.get('text', '') for b in content
+                 if isinstance(b, dict) and b.get('type') == 'text']
+        if not texts:
+            return False
+        content = texts[0]
+    if not isinstance(content, str):
+        return False
+    head = content.lstrip()[:300]
+    if not head or head.startswith(SKIP_PREFIXES) or 'SYSTEM NOTIFICATION' in head:
+        return False
+    return True
+
 count = 0
 with open(sys.argv[1]) as f:
     for line in f:
         try:
-            entry = json.loads(line)
-            msg = entry.get('message', {})
-            if isinstance(msg, dict) and msg.get('role') == 'user':
-                content = msg.get('content', '')
-                # Skip system/command messages — only count real human input
-                if isinstance(content, str) and '<command-message>' in content:
-                    continue
+            if is_human_prompt(json.loads(line)):
                 count += 1
         except:
             pass
