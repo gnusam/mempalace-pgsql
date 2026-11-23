@@ -52,13 +52,16 @@ def _wait_for(path, timeout=5.0):
     return False
 
 
-def _make_transcript(home, n_user_messages):
+def _user_entry(content, **extra):
+    """One transcript line shaped like Claude Code's JSONL (type + message)."""
+    return json.dumps({"type": "user", "message": {"role": "user", "content": content}, **extra})
+
+
+def _make_transcript(home, n_user_messages, noise=()):
     tdir = home / ".claude" / "projects" / "-home-sam-dev-someproj"
     tdir.mkdir(parents=True)
-    lines = [
-        json.dumps({"message": {"role": "user", "content": f"msg {i}"}})
-        for i in range(n_user_messages)
-    ]
+    lines = [_user_entry(f"msg {i}") for i in range(n_user_messages)]
+    lines.extend(noise)
     transcript = tdir / "abc-123.jsonl"
     transcript.write_text("\n".join(lines) + "\n")
     return transcript
@@ -138,6 +141,42 @@ class TestSaveHookMineRouting:
         assert _wait_for(calls), "mine never ran at save interval"
         assert calls.read_text().strip() == f"{transcript.parent} --mode convos"
 
+    def test_non_prompt_entries_do_not_count_toward_interval(self, hook_env):
+        env, home, calls = hook_env
+        noise = [
+            _user_entry([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]),
+            _user_entry("<task-notification>done</task-notification>"),
+            _user_entry("<local-command-stdout>x</local-command-stdout>"),
+            _user_entry("<command-name>/clear</command-name>"),
+            _user_entry("<system-reminder>r</system-reminder>"),
+            _user_entry("Stop hook feedback: save"),
+            _user_entry("This session is being continued from a previous one"),
+            _user_entry("caveat", isMeta=True),
+            json.dumps({"type": "assistant", "message": {"role": "assistant", "content": "hi"}}),
+        ] * 3
+        transcript = _make_transcript(home, 3, noise=noise)
+        result = _run_hook(
+            HOOKS / "mempal_save_hook.sh",
+            {"session_id": "abc-123", "transcript_path": str(transcript)},
+            env,
+        )
+        assert json.loads(result.stdout.strip()) == {}
+        time.sleep(0.3)
+        assert not calls.exists()
+
+    def test_text_block_list_content_counts_as_prompt(self, hook_env):
+        env, home, calls = hook_env
+        transcript = _make_transcript(home, 0)
+        with transcript.open("a") as f:
+            for i in range(20):
+                f.write(_user_entry([{"type": "text", "text": f"prompt {i}"}]) + "\n")
+        result = _run_hook(
+            HOOKS / "mempal_save_hook.sh",
+            {"session_id": "abc-123", "transcript_path": str(transcript)},
+            env,
+        )
+        assert json.loads(result.stdout.strip())["decision"] == "block"
+
 
 class TestPreCompactHookMineRouting:
     def test_always_blocks_and_mines_synchronously(self, hook_env):
@@ -194,15 +233,26 @@ class TestMineWrapperPathTranslation:
         assert len(runs) == 1, "expected exactly one docker run"
         return runs[0]
 
+    def _worker_lines(self, calls):
+        """Persistent-worker path: one detached `run -d` then one `exec`."""
+        lines = calls.read_text().splitlines()
+        runs = [ln for ln in lines if ln.startswith("run ")]
+        execs = [ln for ln in lines if ln.startswith("exec ")]
+        assert len(runs) == 1 and runs[0].startswith("run -d --name mempalace-miner")
+        assert len(execs) == 1
+        return runs[0], execs[0]
+
     def test_transcript_dir_maps_to_transcripts_mount(self, wrapper_env):
         env, home, calls = wrapper_env
         tdir = home / ".claude" / "projects" / "-proj"
         tdir.mkdir(parents=True)
         result = _run_wrapper([str(tdir), "--mode", "convos"], env)
         assert result.returncode == 0, result.stderr
-        run = self._docker_run_line(calls)
+        run, exe = self._worker_lines(calls)
         assert f"{home}/.claude/projects:/transcripts:ro" in run
-        assert "mine /transcripts/-proj --mode convos" in run
+        assert exe == (
+            "exec -i mempalace-miner python -m mempalace mine /transcripts/-proj --mode convos"
+        )
 
     def test_dev_dir_maps_to_projects_mount(self, wrapper_env):
         env, home, calls = wrapper_env
@@ -210,9 +260,11 @@ class TestMineWrapperPathTranslation:
         pdir.mkdir(parents=True)
         result = _run_wrapper([str(pdir), "--mode", "projects"], env)
         assert result.returncode == 0, result.stderr
-        run = self._docker_run_line(calls)
+        run, exe = self._worker_lines(calls)
         assert f"{home}/dev:/projects:ro" in run
-        assert "mine /projects/myapp --mode projects" in run
+        assert exe == (
+            "exec -i mempalace-miner python -m mempalace mine /projects/myapp --mode projects"
+        )
 
     def test_other_dir_mounts_itself(self, wrapper_env):
         env, home, calls = wrapper_env
