@@ -73,52 +73,78 @@ def chunk_exchanges(content: str) -> list:
 def _chunk_by_exchange(lines: list) -> list:
     """One user turn (>) + the AI response that follows = one or more chunks.
 
-    The full AI response is preserved verbatim. When the combined
-    user-turn + response exceeds CHUNK_SIZE the response is split across
-    consecutive drawers so nothing is silently discarded.
+    Every non-blank line lands in a chunk (adapted from upstream 66a354bf,
+    PR #2591). A response runs until the next user turn — a ``---`` rule
+    inside it is part of the response — and any text before the first user
+    turn is filed as its own unit. When a unit exceeds CHUNK_SIZE it is
+    split across consecutive drawers.
     """
     chunks = []
     i = 0
 
+    preamble = []
+    while i < len(lines) and not lines[i].strip().startswith(">"):
+        if lines[i].strip():
+            preamble.append(lines[i].strip())
+        i += 1
+    _emit_bounded(chunks, " ".join(preamble))
+
     while i < len(lines):
-        line = lines[i]
-        if line.strip().startswith(">"):
-            user_turn = line.strip()
+        user_turn = lines[i].strip()
+        i += 1
+
+        ai_lines = []
+        while i < len(lines) and not lines[i].strip().startswith(">"):
+            if lines[i].strip():
+                ai_lines.append(lines[i].strip())
             i += 1
 
-            ai_lines = []
-            while i < len(lines):
-                next_line = lines[i]
-                if next_line.strip().startswith(">") or next_line.strip().startswith("---"):
-                    break
-                if next_line.strip():
-                    ai_lines.append(next_line.strip())
-                i += 1
-
-            ai_response = " ".join(ai_lines)
-            content = f"{user_turn}\n{ai_response}" if ai_response else user_turn
-
-            if len(content) > CHUNK_SIZE:
-                first_part = content[:CHUNK_SIZE]
-                if len(first_part.strip()) > MIN_CHUNK_SIZE:
-                    chunks.append({"content": first_part, "chunk_index": len(chunks)})
-                remainder = content[CHUNK_SIZE:]
-                while remainder:
-                    part = remainder[:CHUNK_SIZE]
-                    remainder = remainder[CHUNK_SIZE:]
-                    if len(part.strip()) > MIN_CHUNK_SIZE:
-                        chunks.append({"content": part, "chunk_index": len(chunks)})
-            elif len(content.strip()) > MIN_CHUNK_SIZE:
-                chunks.append(
-                    {
-                        "content": content,
-                        "chunk_index": len(chunks),
-                    }
-                )
-        else:
-            i += 1
+        ai_response = " ".join(ai_lines)
+        content = f"{user_turn}\n{ai_response}" if ai_response else user_turn
+        _emit_bounded(chunks, content)
 
     return chunks
+
+
+def _emit_bounded(chunks: list, content: str, joiner: str = "\n") -> None:
+    """Append ``content`` as one or more drawers, none exceeding CHUNK_SIZE.
+
+    Nothing but whitespace is ever dropped. A unit whose stripped length is
+    at or below MIN_CHUNK_SIZE is too small to be a useful drawer on its
+    own, so it is appended to the previous drawer (joined by ``joiner``)
+    when that still fits in CHUNK_SIZE, and emitted as its own drawer
+    otherwise.
+    """
+    if not content.strip():
+        return
+    if len(content.strip()) <= MIN_CHUNK_SIZE and chunks:
+        merged = chunks[-1]["content"] + joiner + content
+        if len(merged) <= CHUNK_SIZE:
+            chunks[-1]["content"] = merged
+            return
+    for piece in _split_bounded(content):
+        chunks.append({"content": piece, "chunk_index": len(chunks)})
+
+
+def _split_bounded(content: str) -> list:
+    """Split ``content`` into slices of at most CHUNK_SIZE characters.
+
+    The slices concatenate back to exactly ``content``. Each cut lands just
+    after the last whitespace in the back half of its window, so words are
+    not cut in two; a window with no whitespace there is cut at CHUNK_SIZE.
+    Scanning one window at a time keeps this linear.
+    """
+    pieces = []
+    start = 0
+    while len(content) - start > CHUNK_SIZE:
+        limit = start + CHUNK_SIZE
+        floor = start + CHUNK_SIZE // 2
+        cut = max(content.rfind(ws, floor, limit) for ws in (" ", "\n", "\t"))
+        cut = cut + 1 if cut != -1 else limit
+        pieces.append(content[start:cut])
+        start = cut
+    pieces.append(content[start:])
+    return pieces
 
 
 def _chunk_by_paragraph(content: str) -> list:
@@ -130,14 +156,11 @@ def _chunk_by_paragraph(content: str) -> list:
     if len(paragraphs) <= 1 and content.count("\n") > 20:
         lines = content.split("\n")
         for i in range(0, len(lines), 25):
-            group = "\n".join(lines[i : i + 25]).strip()
-            if len(group) > MIN_CHUNK_SIZE:
-                chunks.append({"content": group, "chunk_index": len(chunks)})
+            _emit_bounded(chunks, "\n".join(lines[i : i + 25]).strip())
         return chunks
 
     for para in paragraphs:
-        if len(para) > MIN_CHUNK_SIZE:
-            chunks.append({"content": para, "chunk_index": len(chunks)})
+        _emit_bounded(chunks, para, joiner="\n\n")
 
     return chunks
 

@@ -104,6 +104,93 @@ def test_chunk_by_exchange_splits_oversize_exchange_across_drawers():
     assert total_len >= len(ai_response)
 
 
+# --- Upstream 66a354bf (PR #2591): the exchange chunker never discards text ---
+
+
+def _words(text):
+    return text.split()
+
+
+def test_chunk_by_exchange_keeps_text_after_a_markdown_rule():
+    """A `---` rule inside an AI reply used to end the response and skip
+    everything up to the next user turn."""
+    text = (
+        "> first question here\nbefore the rule\n---\nafter the rule survives\n\n"
+        "> second question here\nanother answer\n\n> third question here\nlast one\n"
+    )
+    chunks = convo_miner.chunk_exchanges(text)
+    combined = "\n".join(c["content"] for c in chunks)
+    assert "after the rule survives" in combined
+    assert "---" in combined
+
+
+def test_chunk_by_exchange_files_text_before_first_user_turn():
+    text = (
+        "Session started on the staging host and we kept notes\n\n"
+        "> q one here\nanswer one\n\n> q two here\nanswer two\n\n> q three here\nanswer three\n"
+    )
+    chunks = convo_miner.chunk_exchanges(text)
+    assert chunks[0]["content"].startswith("Session started on the staging host")
+    assert [c["chunk_index"] for c in chunks] == list(range(len(chunks)))
+
+
+def test_chunk_by_exchange_short_units_join_previous_drawer_or_stand_alone():
+    """A unit at or below MIN_CHUNK_SIZE is no longer dropped: it joins the
+    previous drawer when it fits, and is emitted on its own otherwise."""
+    long_answer = "x" * (convo_miner.CHUNK_SIZE - 15)
+    text = (
+        "> a longer opening question about storage\n"
+        "an answer that explains it\n\n"
+        "> ok?\nyes\n\n"  # short, fits after the first drawer
+        f"> big one\n{long_answer}\n\n"
+        "> tiny\nno\n\n"  # short, but the previous drawer is already full
+        "> last\nyes\n"
+    )
+    chunks = convo_miner.chunk_exchanges(text)
+    combined = "\n".join(c["content"] for c in chunks)
+    for fragment in ("> ok?", "> tiny", "> last"):
+        assert fragment in combined, f"dropped short unit: {fragment}"
+    assert "> ok?\nyes" in chunks[0]["content"], "short unit should join the previous drawer"
+    assert all(len(c["content"]) <= convo_miner.CHUNK_SIZE for c in chunks)
+    assert any(c["content"].startswith("> tiny") for c in chunks), (
+        "full previous drawer: stand alone"
+    )
+
+
+def test_chunk_by_exchange_short_first_unit_is_kept():
+    text = "> hi\nyo\n\n> q two here\nanswer two\n\n> q three here\nanswer three\n"
+    chunks = convo_miner.chunk_exchanges(text)
+    assert chunks[0]["content"].startswith("> hi")
+
+
+def test_chunk_by_exchange_cuts_at_whitespace_not_mid_word():
+    text = "> explain\n" + " ".join(f"word{i:03d}" for i in range(400)) + "\n\n> b\nc\n\n> d\ne\n"
+    chunks = convo_miner.chunk_exchanges(text)
+    assert len(chunks) > 1
+    assert all(len(c["content"]) <= convo_miner.CHUNK_SIZE for c in chunks)
+    seen = _words("\n".join(c["content"] for c in chunks))
+    # Every word survives whole: no "word0" / "12" fragments from a mid-word cut.
+    assert all(w in ("explain", ">", "b", "c", "d", "e") or w.startswith("word") for w in seen)
+    assert all(len(w) == 7 for w in seen if w.startswith("word"))
+    assert [w for w in seen if w.startswith("word")] == [f"word{i:03d}" for i in range(400)]
+
+
+def test_split_bounded_is_lossless_and_bounded():
+    size = convo_miner.CHUNK_SIZE
+    for content in ("a" * (size * 2 + 7), ("lorem ipsum " * 400).strip(), "x\n" * 900):
+        pieces = convo_miner._split_bounded(content)
+        assert "".join(pieces) == content
+        assert all(len(p) <= size for p in pieces)
+    # No whitespace in the back half of the window: cut at the hard limit.
+    assert [len(p) for p in convo_miner._split_bounded("a" * (size + 5))] == [size, 5]
+
+
+def test_chunk_by_paragraph_keeps_short_paragraphs():
+    text = "A first paragraph that is long enough to stand alone.\n\nok\n\nNext paragraph here, also long enough to be filed."
+    chunks = convo_miner.chunk_exchanges(text)
+    assert any(c["content"].endswith("\n\nok") for c in chunks), "short paragraph was dropped"
+
+
 # --- Upstream 87e8baf (PR #732): 0-chunk files get a sentinel ---
 
 
