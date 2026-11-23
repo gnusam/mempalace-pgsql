@@ -65,6 +65,7 @@ SKIP_DIRS = {
     "vendor",  # PHP/Go vendored deps
     ".gradle",
     "storage",  # Laravel storage (logs, cache)
+    ".worktrees",  # git worktrees stored in-tree (duplicate checkouts)
 }
 
 SKIP_FILENAMES = {
@@ -249,9 +250,23 @@ def is_gitignored(path: Path, matchers: list, is_dir: bool = False) -> bool:
     return ignored
 
 
-def should_skip_dir(dirname: str) -> bool:
-    """Skip known generated/cache directories before gitignore matching."""
-    return dirname in SKIP_DIRS or dirname.endswith(".egg-info")
+def should_skip_dir(dir_path: Path) -> bool:
+    """Skip known generated/cache directories before gitignore matching.
+
+    Takes the full directory path (adapted from upstream 466968ce, PR #2599)
+    so layout-dependent cases can be detected:
+
+    - Any directory whose basename is in ``SKIP_DIRS`` (e.g. ``.worktrees``,
+      git's default worktree storage) or ends in ``.egg-info`` is skipped.
+    - A ``worktrees`` directory is skipped ONLY when it sits directly under a
+      ``.claude`` directory (``<project>/.claude/worktrees/``): those hold
+      full duplicate checkouts that would double the wing. A genuine
+      ``src/worktrees`` package is not under ``.claude`` and still mines.
+    """
+    dirname = dir_path.name
+    if dirname in SKIP_DIRS or dirname.endswith(".egg-info"):
+        return True
+    return dirname == "worktrees" and dir_path.parent.name == ".claude"
 
 
 def normalize_include_paths(include_ignored: list) -> set:
@@ -574,7 +589,7 @@ def scan_project(
             d
             for d in dirs
             if is_force_included(root_path / d, project_path, include_paths)
-            or not should_skip_dir(d)
+            or not should_skip_dir(root_path / d)
         ]
         # User exclude_patterns prune directories too (force-include wins,
         # matching the precedence .gitignore handling uses below).

@@ -217,6 +217,64 @@ def test_scan_project_skip_dirs_still_apply_without_override():
         shutil.rmtree(tmpdir)
 
 
+# ─── Worktrees (upstream 466968ce, PR #2599) ──
+
+
+def test_scan_project_skips_dot_worktrees_dir():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+
+        write_file(project_root / ".worktrees" / "wt-a" / "dup.py", "print('dup')\n" * 20)
+        write_file(project_root / "main.py", "print('main')\n" * 20)
+
+        assert scanned_files(project_root, respect_gitignore=False) == ["main.py"]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_scan_project_skips_claude_worktrees_but_not_src_worktrees():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+
+        write_file(project_root / ".claude" / "worktrees" / "wt" / "dup.py", "print('dup')\n" * 20)
+        write_file(project_root / "src" / "worktrees" / "api.py", "print('api')\n" * 20)
+        write_file(project_root / "main.py", "print('main')\n" * 20)
+
+        assert scanned_files(project_root, respect_gitignore=False) == [
+            "main.py",
+            "src/worktrees/api.py",
+        ]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_scan_project_include_override_beats_worktree_skip():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+
+        write_file(project_root / ".claude" / "worktrees" / "wt" / "dup.py", "print('dup')\n" * 20)
+
+        assert scanned_files(
+            project_root,
+            respect_gitignore=False,
+            include_ignored=[".claude/worktrees"],
+        ) == [".claude/worktrees/wt/dup.py"]
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_should_skip_dir_uses_the_path_layout():
+    from mempalace.miner import should_skip_dir
+
+    assert should_skip_dir(Path("/p/.worktrees"))
+    assert should_skip_dir(Path("/p/.claude/worktrees"))
+    assert not should_skip_dir(Path("/p/src/worktrees"))
+    assert not should_skip_dir(Path("/p/worktrees"))
+
+
 # ─── Anti-noise filters (minification, symlink skip, file-size ceiling) ──
 
 
