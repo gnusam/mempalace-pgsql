@@ -305,16 +305,15 @@ def file_already_mined(db, source_file: str, extract_mode: str = "exchange") -> 
 # =============================================================================
 
 
-def scan_convos(convo_dir: str, include_subagents: bool = False) -> list:
+def scan_convos(convo_dir: str, include_subagents: bool = True) -> list:
     """Find all potential conversation files.
 
-    Directories named ``subagents`` are pruned by default (adapted from
-    upstream 5f425ba4 / a3350ec5, PR #1217): Claude Code records its
-    Explore/Plan/Grep subagent transcripts in
-    ``<session-uuid>/subagents/agent-*.jsonl``, which outweigh the main
-    session files by one to two orders of magnitude while the parent session
-    already summarizes them. Pass ``include_subagents=True`` to mine them
-    anyway. The match is case-insensitive on the whole directory name, so
+    Subagent transcripts (``<session-uuid>/subagents/agent-*.jsonl``) are
+    mined by default. Upstream 5f425ba4 / a3350ec5 (PR #1217) prunes them
+    as noise; this fork keeps them because they carry the agents' own
+    findings and reports, and they are often the only copy left once old
+    transcripts are cleaned up. Pass ``include_subagents=False`` to prune
+    directories named ``subagents``. The match is case-insensitive on the whole directory name, so
     ``mysubagents`` is untouched. It lives here, not in SKIP_DIRS, because
     project mining must keep descending into a code project's own
     ``subagents/`` directories.
@@ -358,7 +357,7 @@ def mine_convos(
     limit: int = 0,
     dry_run: bool = False,
     extract_mode: str = "exchange",
-    include_subagents: bool = False,
+    include_subagents: bool = True,
 ):
     """Mine a directory of conversation files into the palace.
 
@@ -366,8 +365,8 @@ def mine_convos(
         "exchange" — default exchange-pair chunking (Q+A = one unit)
         "general"  — general extractor: decisions, preferences, milestones, problems, emotions
 
-    include_subagents: also mine ``subagents/`` transcripts (skipped by default,
-    see scan_convos).
+    include_subagents: mine ``subagents/`` transcripts (default True, see
+    scan_convos).
     """
 
     convo_path = Path(convo_dir).expanduser().resolve()

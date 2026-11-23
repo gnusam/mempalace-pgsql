@@ -51,7 +51,8 @@ def test_cmd_mcp_quotes_palace_path_with_spaces(capsys):
     assert "'/tmp/palace with spaces'" in out
 
 
-# --- Upstream 5f425ba4 (PR #1217): --include-subagents ---
+# --- Subagent transcripts: mined by default, --exclude-subagents opts out ---
+# (upstream 5f425ba4 / PR #1217 defaults to skipping them; this fork keeps them)
 
 
 def _parse_mine(monkeypatch, *argv):
@@ -65,13 +66,13 @@ def _parse_mine(monkeypatch, *argv):
     return seen[0]
 
 
-def test_mine_include_subagents_flag_defaults_off(monkeypatch):
-    assert _parse_mine(monkeypatch, "--mode", "convos").include_subagents is False
+def test_mine_subagents_included_by_default(monkeypatch):
+    assert _parse_mine(monkeypatch, "--mode", "convos").include_subagents is True
 
 
-def test_mine_include_subagents_flag_parses(monkeypatch):
-    args = _parse_mine(monkeypatch, "--mode", "convos", "--include-subagents")
-    assert args.include_subagents is True
+def test_mine_exclude_subagents_flag_parses(monkeypatch):
+    args = _parse_mine(monkeypatch, "--mode", "convos", "--exclude-subagents")
+    assert args.include_subagents is False
 
 
 def test_cmd_mine_passes_include_subagents_to_convo_miner(monkeypatch):
